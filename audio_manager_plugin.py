@@ -116,22 +116,36 @@ class AudioManager:
     async def _save_tts_to_file(self, text: str, file_path: str):
         """
         Uses ElevenLabs to generate TTS and save to file_path.
+        Follows the proven TTSHandler pattern with proper file sync.
         """
         print(f"🔊 [AudioManager] Generating TTS MP3 for: {text[:64]}...")
-        # ElevenLabs API is synchronous, so run in a thread
-        loop = asyncio.get_event_loop()
-        audio_bytes = await loop.run_in_executor(
-            None,
-            lambda: b"".join(self.eleven.generate(
-                text=text,
-                voice=ELEVENLABS_VOICE,
-                model=ELEVENLABS_MODEL,
-                output_format="mp3_44100_128"
-            ))
-        )
-        with open(file_path, 'wb') as f:
-            f.write(audio_bytes)
-        print(f"✅ [AudioManager] Saved TTS audio to: {file_path}")
+        
+        try:
+            # ElevenLabs API is synchronous, so run in a thread
+            loop = asyncio.get_event_loop()
+            audio_bytes = await loop.run_in_executor(
+                None,
+                lambda: b"".join(self.eleven.generate(
+                    text=text,
+                    voice=ELEVENLABS_VOICE,
+                    model=ELEVENLABS_MODEL,
+                    output_format="mp3_44100_128"
+                ))
+            )
+            
+            print(f"🎵 [AudioManager] ElevenLabs generated {len(audio_bytes)} bytes")
+            
+            # Save to file with proper sync (following TTSHandler pattern)
+            with open(file_path, 'wb') as f:
+                f.write(audio_bytes)
+                f.flush()
+                os.fsync(f.fileno())  # Ensure file is fully written
+                
+            print(f"✅ [AudioManager] Saved TTS audio to: {file_path}")
+            
+        except Exception as e:
+            print(f"❌ [AudioManager] ElevenLabs error: {e}")
+            raise
 
     async def process_audio_queue(self):
         """Persistent queue processor with timeout polling and error handling."""
@@ -215,4 +229,57 @@ class AudioManager:
                     except Exception as e:
                         print(f"Error deleting audio file {audio_file}: {e}")
 
-    # Placeholder for additional methods - include remaining AudioManager methods from original file
+    async def stop_current_audio(self):
+        """Stop currently playing audio."""
+        if self.current_process:
+            try:
+                self.current_process.terminate()
+                await self.current_process.wait()
+                print("Stopped current audio playback")
+            except Exception as e:
+                print(f"Error stopping audio: {e}")
+
+    async def clear_queue(self):
+        """Clear the audio queue."""
+        while not self.audio_queue.empty():
+            try:
+                self.audio_queue.get_nowait()
+                self.audio_queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+        async with self.state_lock:
+            self.state.currently_queued_files.clear()
+        print("Audio queue cleared")
+
+    async def wait_for_audio_completion(self):
+        """Wait for current audio to complete."""
+        if self.state.is_playing:
+            await self.audio_complete.wait()
+
+    async def wait_for_queue_empty(self):
+        """Wait for the audio queue to be empty."""
+        await self.audio_queue.join()
+
+    async def initialize_input(self):
+        """Initialize audio input if needed (placeholder)."""
+        # This method exists for compatibility with other systems
+        # that may expect it. Add actual input initialization if needed.
+        pass
+
+    def reset_audio_state(self):
+        """Reset audio state (for cleanup)."""
+        self.state = AudioManagerState()
+        if self.current_process:
+            try:
+                self.current_process.terminate()
+            except:
+                pass
+        self.current_process = None
+
+    def __del__(self):
+        """Cleanup on deletion."""
+        if hasattr(self, 'pa') and self.pa:
+            try:
+                self.pa.terminate()
+            except:
+                pass
