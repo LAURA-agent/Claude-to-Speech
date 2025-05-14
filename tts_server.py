@@ -14,22 +14,10 @@ from quart_cors import cors
 # Import your audio and streaming handler modules
 sys.path.insert(0, "/home/user/claude-to-speech/LAURA_scripts")
 from audio_manager_plugin import AudioManager
-
-try:
-    from elevenlabs.client import ElevenLabs
-    print("Successfully imported ElevenLabs")
-except ImportError as e:
-    print(f"Error importing ElevenLabs: {e}")
-    sys.exit(1)
-
 from smart_streaming_processor import StreamingTTSHandler
 
-# Configuration
+# Configuration - only server-side settings
 CONFIG = {
-    "tts_engine": "elevenlabs",
-    "elevenlabs_key": "sk_2e9430dbeccdecec954973179fe998b4bec86ba9c081f300",
-    "voice": "L.A.U.R.A.",
-    "elevenlabs_model": "eleven_flash_v2_5",
     "output_dir": str(Path.home() / "LAURA" / "audio_cache")
 }
 
@@ -40,7 +28,6 @@ cors(app)
 
 audio_manager = None
 streaming_handler = None
-eleven = ElevenLabs(api_key=CONFIG["elevenlabs_key"])
 
 
 @app.route('/stream', methods=['POST'])
@@ -50,7 +37,7 @@ async def handle_stream():
     """
     global streaming_handler
     if not streaming_handler:
-        streaming_handler = StreamingTTSHandler(audio_manager, eleven)
+        streaming_handler = StreamingTTSHandler(audio_manager)
 
     try:
         data = await request.json
@@ -89,7 +76,7 @@ async def text_to_speech():
             return jsonify({"error": "No text provided"}), 400
 
         if not streaming_handler:
-            streaming_handler = StreamingTTSHandler(audio_manager, eleven)
+            streaming_handler = StreamingTTSHandler(audio_manager)
 
         # Treat manual requests as a complete chunk for immediate TTS
         await streaming_handler.process_stream_chunk(text, is_complete=True)
@@ -146,6 +133,13 @@ async def startup():
     except Exception as e:
         print(f"Error initializing audio manager: {e}")
         audio_manager = None
+
+@app.after_serving
+async def shutdown():
+    global audio_manager
+    if audio_manager:
+        print("Shutting down audio manager...")
+        await audio_manager.stop_audio_queue()
 
 if __name__ == '__main__':
     print("Starting Smart TTS Server on http://127.0.0.1:5000")
