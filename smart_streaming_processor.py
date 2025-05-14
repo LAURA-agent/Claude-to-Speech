@@ -212,10 +212,9 @@ class StreamingTTSHandler:
     Handles streaming text from browser and coordinates with TTS generation.
     """
     
-    def __init__(self, audio_manager, eleven_client):
+    def __init__(self, audio_manager):
         self.processor = SmartStreamProcessor()
         self.tts_manager = TTSChunkManager(audio_manager)
-        self.eleven_client = eleven_client
         self.conversation_active = False
     
     async def process_stream_chunk(self, text: str, is_complete: bool = False):
