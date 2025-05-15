@@ -24,7 +24,7 @@ CONFIG = {
 os.makedirs(CONFIG["output_dir"], exist_ok=True)
 
 app = Quart(__name__)
-cors(app)
+cors(app, allow_origin="*")
 
 audio_manager = None
 streaming_handler = None
