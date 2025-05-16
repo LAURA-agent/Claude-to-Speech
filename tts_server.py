@@ -29,65 +29,6 @@ cors(app, allow_origin="*")
 audio_manager = None
 streaming_handler = None
 
-
-@app.route('/stream', methods=['POST'])
-async def handle_stream():
-    """
-    Handle streaming text chunks from browser extension.
-    """
-    global streaming_handler
-    if not streaming_handler:
-        streaming_handler = StreamingTTSHandler(audio_manager)
-
-    try:
-        data = await request.json
-        text = data.get('text', '')
-        is_complete = data.get('is_complete', False)
-
-        if not text:
-            return jsonify({"error": "No text provided"}), 400
-
-        print(f"📥 Stream chunk: {len(text)} chars, complete: {is_complete}")
-
-        await streaming_handler.process_stream_chunk(text, is_complete)
-
-        return jsonify({
-            "success": True,
-            "processed": True,
-            "text_length": len(text),
-            "is_complete": is_complete
-        })
-
-    except Exception as e:
-        print(f"❌ Stream error: {e}")
-        traceback.print_exc()
-        return jsonify({"success": False, "error": str(e)}), 500
-
-@app.route('/tts', methods=['POST'])
-async def text_to_speech():
-    """
-    Handle manual TTS requests (single-shot, not streaming).
-    """
-    global streaming_handler
-    try:
-        data = await request.json
-        text = data.get('text', '')
-        if not text:
-            return jsonify({"error": "No text provided"}), 400
-
-        if not streaming_handler:
-            streaming_handler = StreamingTTSHandler(audio_manager)
-
-        # Treat manual requests as a complete chunk for immediate TTS
-        await streaming_handler.process_stream_chunk(text, is_complete=True)
-
-        return jsonify({"success": True, "processed": True})
-
-    except Exception as e:
-        print(f"❌ ERROR: {e}")
-        traceback.print_exc()
-        return jsonify({"success": False, "error": str(e)}), 500
-
 @app.route('/stop_audio', methods=['POST'])
 async def stop_audio():
     if audio_manager:
@@ -100,27 +41,106 @@ async def stop_audio():
     else:
         return jsonify({"success": False, "error": "Audio manager not available"}), 500
 
+@app.route('/stream', methods=['POST'])
+async def handle_stream():
+    """
+    Handle streaming text chunks from browser extension with response ID tracking.
+    """
+    global streaming_handler
+    if not streaming_handler:
+        streaming_handler = StreamingTTSHandler(audio_manager)
+
+    try:
+        data = await request.json
+        text = data.get('text', '')
+        is_complete = data.get('is_complete', False)
+        response_id = data.get('response_id', f'unknown-{int(time.time())}')
+
+        if not text:
+            return jsonify({"error": "No text provided"}), 400
+
+        print(f"📥 Stream chunk [{response_id}]: {len(text)} chars, complete: {is_complete}")
+
+        # Pass response_id to the handler for state tracking
+        await streaming_handler.process_stream_chunk(text, is_complete, response_id)
+
+        return jsonify({
+            "success": True,
+            "processed": True,
+            "text_length": len(text),
+            "is_complete": is_complete,
+            "response_id": response_id
+        })
+
+    except Exception as e:
+        print(f"❌ Stream error: {e}")
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
 @app.route('/reset_conversation', methods=['POST'])
 async def reset_conversation():
     """
-    Resets the conversation state and audio queue.
+    Resets the conversation state and audio queue with response ID tracking.
     """
     global streaming_handler
     try:
-        # Just reset everything for now (stateless)
+        data = await request.json
+        response_id = data.get('response_id', f'reset-{int(time.time())}')
+        
+        print(f"🔄 Reset conversation for response: {response_id}")
+        
+        # Reset with response ID for better state management
         if streaming_handler:
-            await streaming_handler.reset_conversation()
+            streaming_handler.processed_response_ids.clear()
+            await streaming_handler.reset_conversation(response_id)
         if audio_manager:
             await audio_manager.clear_queue()
-        print("🔄 Reset conversation and streaming")
-        return jsonify({"success": True})
+            
+        return jsonify({
+            "success": True, 
+            "response_id": response_id,
+            "message": f"Reset conversation state for {response_id}"
+        })
     except Exception as e:
         print(f"❌ Reset error: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
+@app.route('/tts', methods=['POST'])
+async def text_to_speech():
+    """
+    Handle manual TTS requests (single-shot, not streaming) with response ID.
+    """
+    global streaming_handler
+    try:
+        data = await request.json
+        text = data.get('text', '')
+        response_id = data.get('response_id', f'manual-{int(time.time())}')
+        
+        if not text:
+            return jsonify({"error": "No text provided"}), 400
+
+        if not streaming_handler:
+            streaming_handler = StreamingTTSHandler(audio_manager)
+
+        print(f"📤 Manual TTS [{response_id}]: {len(text)} chars")
+        
+        # Treat manual requests as complete chunks with response ID
+        await streaming_handler.process_stream_chunk(text, is_complete=True, response_id=response_id)
+
+        return jsonify({
+            "success": True, 
+            "processed": True,
+            "response_id": response_id
+        })
+
+    except Exception as e:
+        print(f"❌ ERROR: {e}")
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
 @app.route('/')
 def home():
-    return "Smart Claude TTS Server is running!"
+    return "Claude-to-Speach TTS Server is running!"
 
 @app.before_serving
 async def startup():
