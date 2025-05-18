@@ -2,173 +2,179 @@
 import re
 import asyncio
 import time
+import logging
 from typing import List, Optional, Dict, Tuple
 from dataclasses import dataclass
 
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("tts_server.log", mode='a'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
 @dataclass
 class TextChunk:
-   content: str
-   chunk_type: str  # 'paragraph', 'code', 'artifact'
-   is_complete: bool
-   position: int
-
-class SmartStreamProcessor:
-    def __init__(self):
-        self.full_text = ""
-        self.processed_paragraphs = 0
-        self.inside_code_block = False
-        self.inside_artifact = False
-        
-        # Patterns for detection
-        self.code_start_pattern = re.compile(r'```[a-z]*\n?', re.IGNORECASE)
-        self.code_end_pattern = re.compile(r'```')
-        self.artifact_pattern = re.compile(r'<function_calls>|<invoke>|</invoke>|</function_calls>', re.IGNORECASE)
-    
-    def append_text(self, new_text: str) -> List[TextChunk]:
-        self.full_text += new_text
-        
-        # Split entire text into paragraphs (consistent with get_final_chunks)
-        paragraphs = [p.strip() for p in self.full_text.split('\n\n') if p.strip()]
-        
-        with open('debug_log.txt', 'a') as f:
-            f.write(f"DEBUG: Found {len(paragraphs)} paragraphs, processed {self.processed_paragraphs}\n")
-            for i, p in enumerate(paragraphs):
-                f.write(f"  P{i}: '{p[:150]}...'\n")
-            f.write("---\n")
-        
-        chunks = []
-        # Process only new paragraphs
-        for i in range(self.processed_paragraphs, len(paragraphs)):
-            paragraph = paragraphs[i]
-            if self._get_paragraph_type(paragraph) == 'text':
-                chunks.append(TextChunk(paragraph, 'paragraph', True, i))
-                self.processed_paragraphs = i + 1
-        
-        return chunks
-    
-    def _get_paragraph_type(self, paragraph: str) -> str:
-        if self.code_start_pattern.search(paragraph) or self.code_end_pattern.search(paragraph):
-            return 'code'
-        if self.artifact_pattern.search(paragraph):
-            return 'artifact'
-        return 'text'
-
-    def get_final_chunks(self) -> List[TextChunk]:
-        """Get any remaining unprocessed paragraphs when response is complete."""
-        # Use same splitting logic as append_text for consistency
-        paragraphs = [p.strip() for p in self.full_text.split('\n\n') if p.strip()]
-        
-        chunks = []
-        # Process ALL unprocessed paragraphs in order
-        for i in range(self.processed_paragraphs, len(paragraphs)):
-            paragraph = paragraphs[i]
-            if self._get_paragraph_type(paragraph) == 'text':
-                chunks.append(TextChunk(paragraph, 'paragraph', True, i))
-        
-        # Update processed count to include all paragraphs
-        self.processed_paragraphs = len(paragraphs)
-        
-        with open('debug_log.txt', 'a') as f:
-            f.write(f"FINAL_CHUNKS: Returning {len(chunks)} chunks\n")
-            for i, chunk in enumerate(chunks):
-                f.write(f"  Chunk {i}: '{chunk.content[:100]}...'\n")
-            f.write("===\n")
-        
-        return chunks
-
-    # Deprecated - kept for backward compatibility
-    def get_final_chunk(self) -> Optional[TextChunk]:
-        """Deprecated: Use get_final_chunks() instead."""
-        chunks = self.get_final_chunks()
-        return chunks[0] if chunks else None
-
-class TTSChunkManager:
-   def __init__(self, audio_manager):
-       self.audio_manager = audio_manager
-       self.paragraph_queue = []
-       
-   async def add_paragraph(self, paragraph: str):
-       """Add a paragraph directly to TTS - one chunk per paragraph."""
-       await self._generate_and_queue_tts(paragraph)
-   
-   async def finalize_response(self):
-       """Nothing to do - paragraphs are processed immediately."""
-       pass
-   
-   async def _generate_and_queue_tts(self, text: str):
-       """Generate TTS for a text chunk and queue for playback."""
-       if not text or len(text.strip()) < 5:
-           return
-       
-       try:
-           print(f"🔊 Generating TTS for: {text[:50]}...")
-           await self.audio_manager.queue_audio(
-               generated_text=text,
-               delete_after_play=True
-           )
-       except Exception as e:
-           print(f"❌ TTS generation error: {e}")
-
-
+    content: str
+    response_id: str
+    sequence_number: int
+    is_complete: bool
+    timestamp: float
 
 class StreamingTTSHandler:
     def __init__(self, audio_manager):
         self.audio_manager = audio_manager
         self.processed_response_ids = set()
         self.processing_lock = False
-        self.current_response_id = None
+        self.current_response_base_id = None
+        self.response_chunks = {}  # Store chunks by response base ID
+        self.chunk_counter = {}  # Track chunk sequences per response
         
     async def process_stream_chunk(self, text: str, is_complete: bool = False, response_id: str = None):
-        # Immediate duplicate check
+        # Extract base response ID and sequence number
+        base_id, sequence_num = self._parse_response_id(response_id)
+        
+        # Immediate duplicate check using full response_id
         if response_id in self.processed_response_ids:
-            print(f"⚠️ Skipping duplicate response: {response_id}")
+            logger.warning(f"⚠️ Skipping duplicate chunk: {response_id}")
             return
             
-        # Processing lock to prevent concurrent execution
-        if self.processing_lock:
-            print(f"⚠️ Already processing, skipping {response_id}")
-            return
-            
-        self.processing_lock = True
+        logger.info(f"📥 Processing chunk [{response_id}]: {len(text)} chars, sequence: {sequence_num}, complete: {is_complete}")
+        
+        # Mark as processed immediately to prevent duplicates
+        self.processed_response_ids.add(response_id)
+        
+        # Store chunk information
+        chunk = TextChunk(
+            content=text.strip(),
+            response_id=response_id,
+            sequence_number=sequence_num,
+            is_complete=is_complete,
+            timestamp=time.time()
+        )
+        
+        # Initialize response tracking if new
+        if base_id not in self.response_chunks:
+            self.response_chunks[base_id] = []
+            self.chunk_counter[base_id] = 0
+            logger.info(f"🆕 Starting new response: {base_id}")
+        
+        # Add chunk to response
+        self.response_chunks[base_id].append(chunk)
         
         try:
-            print(f"📥 Processing: {response_id} ({len(text)} chars, complete: {is_complete})")
-            
-            # Only handle complete responses
-            if is_complete and text.strip():
-                # Mark as processed immediately to prevent duplicates
-                self.processed_response_ids.add(response_id)
-                self.current_response_id = response_id
+            # Since content script now handles boundaries, text should be clean
+            # No need to check for code blocks - just process directly
+            if chunk.content and len(chunk.content) > 5:
+                logger.info(f"🔊 Sending to TTS (sequence {sequence_num}): {chunk.content[:100]}...")
                 
-                # Generate TTS directly
-                print(f"🔊 Sending to TTS: {text[:100]}...")
+                # Queue with sequence information for proper ordering
                 await self.audio_manager.queue_audio(
-                    generated_text=text,
-                    delete_after_play=True
+                    generated_text=chunk.content,
+                    delete_after_play=True,
                 )
-                print(f"✅ TTS queued for {response_id}")
+                
+                logger.info(f"✅ TTS queued for {response_id}")
             else:
-                print(f"⚠️ Skipping incomplete or empty response")
+                logger.warning(f"⚠️ Skipping empty or too short chunk: {response_id}")
                 
         except Exception as e:
-            print(f"❌ TTS Error for {response_id}: {e}")
+            logger.error(f"❌ TTS Error for {response_id}: {e}", exc_info=True)
             # Remove from processed set if it failed
             self.processed_response_ids.discard(response_id)
             
-        finally:
-            self.processing_lock = False
+        # Check if this response is complete
+        if is_complete:
+            await self._finalize_response(base_id)
+    
+    def _parse_response_id(self, response_id: str) -> Tuple[str, int]:
+        """
+        Parse response ID to extract base ID and sequence number.
+        Expected format: base_id-chunk-timestamp-sequence
+        """
+        if not response_id:
+            return f"unknown-{int(time.time())}", 0
+            
+        try:
+            # Split by last dash to get sequence number
+            parts = response_id.rsplit('-', 1)
+            if len(parts) == 2 and parts[1].isdigit():
+                base_id = parts[0]
+                sequence_num = int(parts[1])
+            else:
+                # No sequence number found, treat as sequence 0
+                base_id = response_id
+                sequence_num = 0
+                
+            # Extract the actual base (remove chunk/delta/final suffixes)
+            base_parts = base_id.split('-')
+            # Remove common suffixes
+            filtered_parts = []
+            skip_next = False
+            for part in base_parts:
+                if skip_next:
+                    skip_next = False
+                    continue
+                if part in ['chunk', 'delta', 'final']:
+                    skip_next = True  # Skip the timestamp after these keywords
+                    continue
+                filtered_parts.append(part)
+            
+            clean_base_id = '-'.join(filtered_parts[:3])  # Keep first 3 parts typically timestamp-position-hash
+            
+            return clean_base_id, sequence_num
+            
+        except Exception as e:
+            logger.warning(f"Error parsing response ID {response_id}: {e}")
+            return response_id, 0
+    
+    async def _finalize_response(self, base_id: str):
+        """
+        Handle response completion - log statistics and cleanup.
+        """
+        if base_id not in self.response_chunks:
+            return
+            
+        chunks = self.response_chunks[base_id]
+        total_chars = sum(len(chunk.content) for chunk in chunks)
+        
+        logger.info(f"🏁 Response {base_id} complete: {len(chunks)} chunks, {total_chars} total characters")
+        
+        # Optional: Schedule cleanup after some time to free memory
+        asyncio.create_task(self._cleanup_response(base_id, delay=300))  # Clean up after 5 minutes
+    
+    async def _cleanup_response(self, base_id: str, delay: int = 300):
+        """
+        Clean up old response data to prevent memory leaks.
+        """
+        await asyncio.sleep(delay)
+        
+        if base_id in self.response_chunks:
+            chunk_count = len(self.response_chunks[base_id])
+            del self.response_chunks[base_id]
+            del self.chunk_counter[base_id]
+            logger.debug(f"🧹 Cleaned up response {base_id} ({chunk_count} chunks)")
     
     async def reset_conversation(self, response_id: str = None):
         """Reset conversation state and clear audio queue"""
-        print(f"🔄 Reset conversation for: {response_id}")
+        logger.info(f"🔄 Reset conversation for: {response_id}")
         
-        # Clear processed IDs to allow new conversation
+        # Clear all state
         self.processed_response_ids.clear()
-        self.current_response_id = response_id
+        self.response_chunks.clear()
+        self.chunk_counter.clear()
+        self.current_response_base_id = None
         self.processing_lock = False
         
         # Clear audio queue
         if self.audio_manager:
             await self.audio_manager.clear_queue()
         
-        print(f"✅ Conversation reset complete")
+        logger.info(f"✅ Conversation reset complete")
+
+# Remove the old TTSChunkManager class - no longer needed
+# The StreamingTTSHandler now handles everything
