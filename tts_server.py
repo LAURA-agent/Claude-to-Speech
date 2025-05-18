@@ -1,12 +1,27 @@
 #!/usr/bin/env python3
 
+import asyncio
 import sys
 import os
 import time
 import traceback
-from pathlib import Path
 import logging
+from pathlib import Path
+
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("tts_server.log", mode='a'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Suppress quart logs
 logging.getLogger('quart.app').setLevel(logging.WARNING)
+logging.getLogger('quart.serving').setLevel(logging.WARNING)
 
 from quart import Quart, request, jsonify
 from quart_cors import cors
@@ -18,7 +33,9 @@ from smart_streaming_processor import StreamingTTSHandler
 
 # Configuration - only server-side settings
 CONFIG = {
-    "output_dir": str(Path.home() / "LAURA" / "audio_cache")
+    "output_dir": str(Path.home() / "LAURA" / "audio_cache"),
+    "max_retries": 3,
+    "retry_delay": 0.5
 }
 
 os.makedirs(CONFIG["output_dir"], exist_ok=True)
@@ -37,6 +54,7 @@ async def stop_audio():
             await audio_manager.clear_queue()
             return jsonify({"success": True, "message": "Audio stopped"})
         except Exception as e:
+            logger.error(f"Error stopping audio: {e}", exc_info=True)
             return jsonify({"success": False, "error": str(e)}), 500
     else:
         return jsonify({"success": False, "error": "Audio manager not available"}), 500
@@ -59,10 +77,24 @@ async def handle_stream():
         if not text:
             return jsonify({"error": "No text provided"}), 400
 
-        print(f"📥 Stream chunk [{response_id}]: {len(text)} chars, complete: {is_complete}")
+        logger.info(f"📥 Stream chunk [{response_id}]: {len(text)} chars, complete: {is_complete}")
 
-        # Pass response_id to the handler for state tracking
-        await streaming_handler.process_stream_chunk(text, is_complete, response_id)
+        # Create a cancellable task to process the chunk
+        task = asyncio.create_task(
+            streaming_handler.process_stream_chunk(text, is_complete, response_id)
+        )
+        
+        # Use a timeout to ensure the request doesn't hang indefinitely
+        try:
+            await asyncio.wait_for(task, timeout=10.0)
+        except asyncio.TimeoutError:
+            logger.warning(f"Processing timeout for response {response_id}, continuing in background")
+            # Let it continue in the background
+            pass
+        except Exception as e:
+            logger.error(f"Error during streaming: {e}", exc_info=True)
+            # Don't cancel the task, let it continue in the background
+            pass
 
         return jsonify({
             "success": True,
@@ -73,8 +105,7 @@ async def handle_stream():
         })
 
     except Exception as e:
-        print(f"❌ Stream error: {e}")
-        traceback.print_exc()
+        logger.error(f"❌ Stream error: {e}", exc_info=True)
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/reset_conversation', methods=['POST'])
@@ -87,7 +118,7 @@ async def reset_conversation():
         data = await request.json
         response_id = data.get('response_id', f'reset-{int(time.time())}')
         
-        print(f"🔄 Reset conversation for response: {response_id}")
+        logger.info(f"🔄 Reset conversation for response: {response_id}")
         
         # Reset with response ID for better state management
         if streaming_handler:
@@ -102,7 +133,7 @@ async def reset_conversation():
             "message": f"Reset conversation state for {response_id}"
         })
     except Exception as e:
-        print(f"❌ Reset error: {e}")
+        logger.error(f"❌ Reset error: {e}", exc_info=True)
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/tts', methods=['POST'])
@@ -122,10 +153,12 @@ async def text_to_speech():
         if not streaming_handler:
             streaming_handler = StreamingTTSHandler(audio_manager)
 
-        print(f"📤 Manual TTS [{response_id}]: {len(text)} chars")
+        logger.info(f"📤 Manual TTS [{response_id}]: {len(text)} chars")
         
-        # Treat manual requests as complete chunks with response ID
-        await streaming_handler.process_stream_chunk(text, is_complete=True, response_id=response_id)
+        # Start processing but don't wait for it to complete
+        asyncio.create_task(
+            streaming_handler.process_stream_chunk(text, is_complete=True, response_id=response_id)
+        )
 
         return jsonify({
             "success": True, 
@@ -134,33 +167,49 @@ async def text_to_speech():
         })
 
     except Exception as e:
-        print(f"❌ ERROR: {e}")
-        traceback.print_exc()
+        logger.error(f"❌ ERROR: {e}", exc_info=True)
         return jsonify({"success": False, "error": str(e)}), 500
 
+@app.route('/health', methods=['GET'])
+async def health_check():
+    """
+    Simple health check endpoint to verify server is running.
+    """
+    try:
+        return jsonify({
+            "status": "ok",
+            "server": "Claude-to-Speech TTS Server",
+            "version": "2.0",
+            "audio_manager": "ready" if audio_manager else "not initialized",
+            "timestamp": time.time()
+        })
+    except Exception as e:
+        logger.error(f"Health check error: {e}")
+        return jsonify({"status": "error", "error": str(e)}), 500
+
 @app.route('/')
-def home():
-    return "Claude-to-Speach TTS Server is running!"
+async def home():
+    return "Claude-to-Speech TTS Server is running!"
 
 @app.before_serving
 async def startup():
     global audio_manager
-    print("Initializing audio manager...")
+    logger.info("Initializing audio manager...")
     audio_manager = AudioManager()
     try:
         await audio_manager.initialize_input()
-        print("Audio manager initialized successfully")
+        logger.info("Audio manager initialized successfully")
     except Exception as e:
-        print(f"Error initializing audio manager: {e}")
+        logger.error(f"Error initializing audio manager: {e}", exc_info=True)
         audio_manager = None
 
 @app.after_serving
 async def shutdown():
     global audio_manager
     if audio_manager:
-        print("Shutting down audio manager...")
+        logger.info("Shutting down audio manager...")
         await audio_manager.stop_audio_queue()
 
 if __name__ == '__main__':
-    print("Starting Smart TTS Server on http://127.0.0.1:5000")
+    logger.info("Starting Smart TTS Server on http://127.0.0.1:5000")
     app.run(host='127.0.0.1', port=5000, debug=False)
