@@ -1,6 +1,5 @@
-// Smart Streaming Content Script for Claude - Fixed Version
-console.log("🚀 Smart Streaming Claude TTS loaded - Version 2.0");
-
+// Smart Streaming Content Script for Claude - Version 3.3 - CLEANED
+console.log("🚀 Smart Streaming Claude TTS loaded - Version 3.3");
 
 class ClaudeStreamMonitor {
   constructor() {
@@ -15,60 +14,228 @@ class ClaudeStreamMonitor {
     this.lastProcessedResponseId = null;
     this.conversationModeStartTime = null;
     this.processedChunks = new Map();
-
-    // Load settings
+    this.currentResponseText = "";
+    this.lastSentLength = 0;
+    this.pendingRetries = [];
+    this.isRetrying = false;
+    this.serverHealthy = true;
+    this.failedRequests = [];
+    
+    // Load settings and reset server
     this.loadSettings();
-  
-    // Clear server state on page refresh
     this.resetServerOnPageLoad();
+    
+    // Start health check polling
+    this.startHealthCheck();
   }
 
-async resetServerOnPageLoad() {
-  // Give page a moment to fully load
-  setTimeout(async () => {
-    await this.sendToServer("/reset_conversation", {
-      client_ip: 'browser',
-      response_id: 'page-refresh-' + Date.now()
-    });
-    console.log("🔄 Cleared server state after page load");
-  }, 500);
-}
+  // Improved health check polling
+  async startHealthCheck() {
+    try {
+      const result = await fetch("http://127.0.0.1:5000/health", {
+        method: 'GET',
+      }).then(res => res.json());
+      
+      if (result.status === "ok") {
+        console.log("✅ TTS Server is healthy");
+        this.serverHealthy = true;
+        
+        // If server just came back online, retry failed requests
+        if (this.failedRequests.length > 0 && !this.isRetrying) {
+          this.retryFailedRequests();
+        }
+      } else {
+        console.error("❌ TTS Server reported unhealthy status:", result);
+        this.serverHealthy = false;
+      }
+    } catch (e) {
+      console.error("❌ TTS Server health check failed:", e);
+      this.serverHealthy = false;
+    }
+    
+    // Poll every 10 seconds
+    setTimeout(() => this.startHealthCheck(), 10000);
+  }
   
+  // Retry mechanism for failed requests
+  async retryFailedRequests() {
+    if (this.isRetrying || this.failedRequests.length === 0) return;
+    
+    this.isRetrying = true;
+    console.log(`🔄 Retrying ${this.failedRequests.length} failed requests`);
+    
+    const requests = [...this.failedRequests];
+    this.failedRequests = [];
+    
+    for (const req of requests) {
+      try {
+        console.log(`🔄 Retrying request for ${req.responseId}`);
+        await this.sendStreamChunk(req.text, req.isComplete, req.responseId);
+        await new Promise(resolve => setTimeout(resolve, 500)); // Space out retries
+      } catch (e) {
+        console.error(`❌ Retry failed for ${req.responseId}:`, e);
+        // Don't re-add to failed requests to avoid infinite loops
+      }
+    }
+    
+    this.isRetrying = false;
+  }
+
+  // Improved reset method for new responses
+  resetForNewResponse() {
+    console.log("🔄 Resetting for new response");
+    this.currentResponseElement = null;
+    this.currentResponseText = "";
+    this.lastSentLength = 0;
+    this.processedChunks.clear();
+    
+    // Send any final fragments that might be pending
+    this.sendFinalChunk();
+  }
+
+  // Send any final text that hasn't been sent yet
+  sendFinalChunk() {
+    // Final safety check - if there's remaining text, send it
+    if (this.currentResponseText.length > 0 && 
+        this.lastSentLength < this.currentResponseText.length) {
+      
+      const remaining = this.currentResponseText.substring(this.lastSentLength);
+      if (remaining.trim()) {
+        const responseId = `${this.generateResponseId(this.currentResponseElement)}-final`;
+        console.log(`📤 Sending final chunk: ${remaining.substring(0, 50)}... (${remaining.length} chars)`);
+        this.sendStreamChunk(remaining, true, responseId);
+      }
+    }
+  }
+
+  // Find the latest Claude response
+  findClaudeResponse() {
+    // Look for any element with data-is-streaming attribute (works for both modes)
+    const streamingElements = document.querySelectorAll('[data-is-streaming]');
+    if (streamingElements.length > 0) {
+      const latest = streamingElements[streamingElements.length - 1];
+      
+      // Check if it's still streaming
+      const isStreaming = latest.getAttribute('data-is-streaming') === 'true';
+      
+      if (isStreaming) {
+        console.log("🔄 Claude is currently streaming...");
+        // For extended thinking: return streaming element
+        // For normal mode: return the main element (it will update in-place)
+        return latest;
+      } else {
+        console.log("✅ Claude response complete");
+        // Look for the font-claude-message child (works for both modes)
+        const messageDiv = latest.querySelector('.font-claude-message');
+        return messageDiv || latest;
+      }
+    }
+    
+    // Fallback to existing logic if no streaming elements found
+    const completedElements = document.querySelectorAll('.font-claude-message');
+    if (completedElements.length > 0) {
+      return completedElements[completedElements.length - 1];
+    }
+    
+    return null;
+  }
+
+  // Reset server state on page load
+  async resetServerOnPageLoad() {
+    // Give page a moment to fully load
+    setTimeout(async () => {
+      try {
+        const result = await this.sendToServer("/reset_conversation", {
+          client_ip: 'browser',
+          response_id: 'page-refresh-' + Date.now()
+        });
+        
+        if (result.success) {
+          console.log("🔄 Cleared server state after page load");
+        } else {
+          console.error("❌ Failed to reset server state:", result.error);
+        }
+      } catch (error) {
+        console.error("❌ Error resetting server:", error);
+      }
+    }, 1000);
+  }
+    
+  // Load user settings from storage
   async loadSettings() {
-    const result = await chrome.storage.local.get(['conversationMode']);
-    this.conversationMode = result.conversationMode || false;
-    console.log(`📊 Loaded conversation mode: ${this.conversationMode}`);
+    try {
+      const result = await chrome.storage.local.get(['conversationMode']);
+      this.conversationMode = result.conversationMode || false;
+      console.log(`📊 Loaded conversation mode: ${this.conversationMode}`);
+    } catch (error) {
+      console.error("❌ Error loading settings:", error);
+      this.conversationMode = false;
+    }
   }
-  
-startMonitoring() {
-  if (this.isMonitoring) return;
-  
-  console.log("🔄 Starting smart stream monitoring");
-  this.isMonitoring = true;
-  
-  // Set up mutation observer for real-time detection
-  this.observer = new MutationObserver((mutations) => {
-    if (!this.conversationMode || this.processingLock) return;
-    this.debounceAndProcess();
-  });
-  
-  // updated selector:
-  const target = document.querySelector('main') || 
-                 document.querySelector('[data-testid="conversation-container"]') ||
-                 document.querySelector('.conversation');
-                 
-  if (target) {
-    this.observer.observe(target, {
-      childList: true,
-      subtree: true,
-      characterData: true
+    
+  // Start the monitoring system
+  startMonitoring() {
+    if (this.isMonitoring) return;
+    
+    console.log("🔄 Starting smart stream monitoring");
+    this.isMonitoring = true;
+    this.conversationModeStartTime = Date.now();
+    
+    // Set up mutation observer
+    this.observer = new MutationObserver((mutations) => {
+      if (!this.conversationMode || this.processingLock) return;
+      
+      // Check if any mutations involve Claude messages
+      const hasClaudeMessage = mutations.some(mutation => {
+        return Array.from(mutation.addedNodes).some(node => {
+          return node.nodeType === 1 && (
+            node.classList?.contains('font-claude-message') ||
+            node.querySelector?.('.font-claude-message') ||
+            node.hasAttribute?.('data-message-author-role') && 
+            node.getAttribute('data-message-author-role') === 'assistant' ||
+            node.querySelector?.('[data-message-author-role="assistant"]')
+          );
+        });
+      });
+      
+      if (hasClaudeMessage) {
+        this.debounceAndProcess();
+      }
     });
-    console.log("✅ Observer attached to:", target);
-  } else {
-    console.error("❌ No target found for observer");
+    
+    // Try different container options
+    const possibleContainers = [
+      // Try XPath first (most specific)
+      document.evaluate(
+        '/html/body/div[2]/div[2]/div/div[1]/div/div/div[1]',
+        document,
+        null,
+        XPathResult.FIRST_ORDERED_NODE_TYPE,
+        null
+      ).singleNodeValue,
+      // Then try various selectors
+      document.querySelector('main'),
+      document.querySelector('.conversation-container'),
+      document.querySelector('[data-testid="conversation-main"]'),
+      // Fallback to body if nothing else works
+      document.body
+    ];
+    
+    // Use the first valid container
+    const target = possibleContainers.find(container => container !== null);
+    
+    if (target) {
+      this.observer.observe(target, { childList: true, subtree: true, characterData: true });
+      console.log("✅ Observer attached to container:", target);
+      
+      // Process any existing response immediately
+      this.processStreamUpdate();
+    } else {
+      console.error("❌ Could not find any suitable container for observing");
+    }
   }
-}
-  
+
+  // Stop monitoring
   stopMonitoring() {
     console.log("⏹️ Stopping stream monitoring");
     this.isMonitoring = false;
@@ -80,193 +247,233 @@ startMonitoring() {
     
     clearTimeout(this.debounceTimer);
   }
-  
+    
+  // Debounce function to avoid too many processing calls
   debounceAndProcess() {
-    // Longer debounce for stability - increased from 300ms to 800ms
+    // Debounce to avoid processing every tiny DOM change
     clearTimeout(this.debounceTimer);
     this.debounceTimer = setTimeout(() => {
       this.processStreamUpdate();
-    }, 800);
+    }, 300);
   }
+    
+  // Main function to process Claude's response - COMPLETE REWRITE
+async processStreamUpdate() {
+  if (!this.conversationMode) return;
   
-processStreamUpdate() {
-  if (!this.conversationMode || this.processingLock) return;
+  if (this.processingLock) {
+    setTimeout(() => this.processStreamUpdate(), 500);
+    return;
+  }
   
   this.processingLock = true;
   
   try {
     const response = this.findClaudeResponse();
-    if (!response) return;
-    
-    const chunks = this.parseResponseIntoChunks(response);
-    const currentId = this.generateResponseId(response);
-    
-    // Track chunks per response
-    if (!this.processedChunks.has(currentId)) {
-      this.processedChunks.set(currentId, 0);
+    if (!response) {
+      this.processingLock = false;
+      return;
     }
     
-    const alreadySent = this.processedChunks.get(currentId);
-    const newChunks = chunks.slice(alreadySent);
-    
-    // Send new chunks as they appear
-    for (let i = 0; i < newChunks.length; i++) {
-      const chunk = newChunks[i];
-      this.sendStreamChunk(chunk, false, `${currentId}-chunk-${alreadySent + i}`);
-      this.processedChunks.set(currentId, alreadySent + i + 1);
+    // Check if new response
+    if (response !== this.currentResponseElement) {
+      this.currentResponseElement = response;
+      this.lastSentLength = 0;
     }
     
+    const currentText = response.textContent || "";
+    const isStreaming = this.isClaudeTyping(response);
+    
+    // Only send if we have new text
+    if (currentText.length > this.lastSentLength) {
+      const newText = currentText.substring(this.lastSentLength);
+      
+      if (isStreaming) {
+        // While streaming - look for sentence endings
+        const match = newText.match(/^.*?[.!?]\s+/);
+        if (match && match[0].length > 25) {
+          const sentence = match[0].trim();
+          const responseId = `${Date.now()}-sentence`;
+          
+          await this.sendStreamChunk(sentence, false, responseId);
+          this.lastSentLength += match[0].length;
+        }
+      } else {
+        // Response complete - send everything remaining
+        if (newText.trim().length > 10) {
+          const responseId = `${Date.now()}-final`;
+          await this.sendStreamChunk(newText.trim(), true, responseId);
+          this.lastSentLength = currentText.length;
+          
+          // Reset for next response
+          setTimeout(() => {
+            this.currentResponseElement = null;
+            this.lastSentLength = 0;
+          }, 1000);
+        }
+      }
+    }
+    
+  } catch (error) {
+    console.error("❌ Process error:", error);
   } finally {
     this.processingLock = false;
   }
 }
 
+  // Find the next boundary (code block, artifact, etc.)
+  findNextBoundary(text, startPosition) {
+    const textToCheck = text.substring(startPosition);
+    
+    // Define boundary patterns and their handlers
+    const boundaries = [
+      {
+        name: 'code_block_start',
+        pattern: /```/,
+        handler: (match, fullText, pos) => {
+          // Find the closing ```
+          const closingPos = fullText.indexOf('```', pos + 3);
+          if (closingPos !== -1) {
+            return { position: pos, endPosition: closingPos + 3, type: 'code_block' };
+          }
+          return { position: pos, endPosition: pos + 3, type: 'code_block_unclosed' };
+        }
+      },
+      {
+        name: 'artifact_start',
+        pattern: /<function_calls>/i,
+        handler: (match, fullText, pos) => {
+          // Find the closing tag
+          const closingPos = fullText.indexOf('</function_calls>', pos);
+          if (closingPos !== -1) {
+            return { position: pos, endPosition: closingPos + 17, type: 'artifact' };
+          }
+          return { position: pos, endPosition: pos + 100, type: 'artifact_unclosed' };
+        }
+      },
+      {
+        name: 'artifact_block',
+        pattern: /\[artifact[^\]]*\]/i,
+        handler: (match, fullText, pos) => {
+          // Artifacts are usually self-contained
+          return { position: pos, endPosition: pos + match[0].length, type: 'artifact_block' };
+        }
+      }
+    ];
+    
+    let nearestBoundary = null;
+    let nearestPosition = Infinity;
+    
+    // Check each boundary type
+    for (const boundary of boundaries) {
+      const match = textToCheck.match(boundary.pattern);
+      if (match && match.index < nearestPosition) {
+        const absolutePosition = startPosition + match.index;
+        nearestBoundary = boundary.handler(match, text, absolutePosition);
+        nearestPosition = match.index;
+      }
+    }
+    
+    if (nearestBoundary) {
+      console.log(`🎯 Found ${nearestBoundary.type} boundary at position ${nearestBoundary.position}`);
+      return { found: true, ...nearestBoundary };
+    }
+    
+    return { found: false };
+  }
+
+    // Find a complete sentence in the new text
+  findCompleteSentence(text) {
+    // Simple approach - just wait for sentence endings
+    const match = text.match(/^.*?[.!?]\s*/);
+  
+    if (match && match[0].length > 15) {
+      return {
+        found: true,
+        text: match[0].trim(),
+        endPosition: match[0].length
+      };
+    }
+  
+    return { found: false };
+  }
+
+  // Simple text extraction for manual detection
+  extractText(element) {
+    if (!element) return null;
+    
+    try {
+      // Clone the element to avoid modifying the original
+      const clone = element.cloneNode(true);
+
+      // Remove code blocks and artifacts
+      const codeBlocks = clone.querySelectorAll('pre, code');
+      codeBlocks.forEach(block => block.remove());
+
+      const artifacts = clone.querySelectorAll('[data-testid*="artifact"], .artifact-block');
+      artifacts.forEach(artifact => artifact.remove());
+
+      let text = clone.textContent.trim();
+      
+      // Basic validation
+      if (text.length < 5) return null;
+      
+      return text;
+    } catch (error) {
+      console.error("Error extracting text:", error);
+      return null;
+    }
+  }
+
+  // Get timestamp for response
   getResponseTimestamp(element) {
     // Use DOM position as a proxy for creation time
     const allResponses = document.querySelectorAll('[data-message-author-role="assistant"]');
     return this.conversationModeStartTime + Array.from(allResponses).indexOf(element);
   }
-  
-  findClaudeResponse() {
-    // First try the official attribute selector
-    const responses = document.querySelectorAll('[data-message-author-role="assistant"]');
-    
-    if (responses.length === 0) {
-      // If that fails, manually grab the last Claude message
-      const allClaudeMessages = document.querySelectorAll('.font-claude-message');
-      
-      if (allClaudeMessages.length > 0) {
-        return allClaudeMessages[allClaudeMessages.length - 1];
-      }
-      
-      // Final fallback - try these selectors in order
-      const fallbackSelectors = [
-        'div[data-test-render-count]:last-child div.font-claude-message',
-        'div[data-test-render-count]:last-child',
-        '.font-claude-message:not([data-testid="user-message"] *)'
+
+  // Detect if Claude is still typing
+  isClaudeTyping(responseElement) {
+    try {
+      // Check for typing indicators
+      const typingIndicators = [
+        '.typing-indicator',
+        '.loading',
+        '[class*="typing"]',
+        '[class*="loading"]',
+        '.animate-pulse',
+        '[class*="cursor"]',
+        '.blinking-cursor'
       ];
       
-      for (const selector of fallbackSelectors) {
-        const elements = document.querySelectorAll(selector);
-        if (elements.length > 0) {
-          return elements[elements.length - 1];
+      for (const indicator of typingIndicators) {
+        if (responseElement.querySelector(indicator)) {
+          return true;
         }
       }
-      return null;
-    }
-    
-    const lastResponse = responses[responses.length - 1];
-    
-    // Check if this response existed when we started monitoring
-    if (this.conversationModeStartTime && lastResponse) {
-      const responseTime = this.getResponseTimestamp(lastResponse);
-      if (responseTime < this.conversationModeStartTime) {
-        console.log("⚠️ Skipping pre-existing response");
-        return null;
-      }
-    }
-
-    // Validate we have complete content
-    const textContent = lastResponse.textContent.trim();
-    if (textContent.length < 10) {
-      console.log("⚠️ Response too short, waiting for more content");
-      return null;
-    }
-    
-    // Check for completion indicators - if typing and content is very short, wait
-    const isTyping = lastResponse.querySelector('.typing-indicator, .animate-pulse, [class*="typing"], [class*="loading"]');
-    if (isTyping && textContent.length < 50) {
-      console.log("⚠️ Detected typing with short content, waiting...");
-      return null;
-    }
-    
-    return lastResponse;
-  }
-
-  extractText(element) {
-    if (!element) return null;
-    
-    // Clone the element to avoid modifying the original
-    const clone = element.cloneNode(true);
-  
-    // Remove artifact buttons and their content
-    const artifactButtons = clone.querySelectorAll('button[aria-label="Preview contents"]');
-    artifactButtons.forEach(button => button.remove());
-
-    // Remove code blocks in pre tags
-    const preElements = clone.querySelectorAll('pre');
-    preElements.forEach(pre => pre.remove());
-  
-    // Remove any other artifact containers
-    const artifactContainers = clone.querySelectorAll('.artifact-block-cell');
-    artifactContainers.forEach(container => container.remove());
-  
-    let text = clone.textContent.trim();
-    
-    // Remove code blocks before sending to TTS
-    text = text.replace(/```[\s\S]*?```/g, '[Code block]');
-    text = text.replace(/`[^`]+`/g, '[Code]');
-    
-    // Basic corruption detection patterns
-    const corruptionPatterns = [
-      /cuts ofnts/,  // Specific corruption we've seen
-      /\b\w+#<---/,  // Truncation markers
-    ];
-
-    // Skip corruption check entirely for code-related content
-    if (text.includes('`/') || text.includes('```') || text.includes('regex')) {
-      return text; // Code blocks and regex discussions get a free pass
-    }
-    
-    for (const pattern of corruptionPatterns) {
-      if (pattern.test(text)) {
-        console.warn('🔴 Detected corrupted text pattern:', pattern.toString());
-        console.warn('🔴 Corrupted text sample:', text.substring(0, 100));
-        return null;
-      }
-    }
-    
-    // Additional validation
-    if (text.length < 5) return null;
-    
-    return text;
-  }
-  
-  isClaudeTyping(responseElement) {
-    // Check for typing indicators
-    const typingIndicators = [
-      '.typing-indicator',
-      '.loading',
-      '[class*="typing"]',
-      '[class*="loading"]',
-      '.animate-pulse',
-      '[class*="cursor"]',
-      '.blinking-cursor'
-    ];
-    
-    for (const indicator of typingIndicators) {
-      if (responseElement.querySelector(indicator)) {
+      
+      // Check if the send button is disabled (Claude is responding)
+      const sendButton = document.querySelector('button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"]');
+      if (sendButton && sendButton.disabled) {
         return true;
       }
+      
+      // Check for streaming indicators in parent containers
+      const streamingContainer = responseElement.closest('[class*="streaming"], [class*="generating"]');
+      if (streamingContainer) {
+        return true;
+      }
+      
+      return false;
+    } catch (error) {
+      console.error("Error checking if Claude is typing:", error);
+      return false;
     }
-    
-    // Check if the send button is disabled (Claude is responding)
-    const sendButton = document.querySelector('button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"]');
-    if (sendButton && sendButton.disabled) {
-      return true;
-    }
-    
-    // Check for streaming indicators in parent containers
-    const streamingContainer = responseElement.closest('[class*="streaming"], [class*="generating"]');
-    if (streamingContainer) {
-      return true;
-    }
-    
-    return false;
   }
-  
+    
+  // Generate a unique ID for each response
   generateResponseId(element) {
-    if (!element) return null;
+    if (!element) return `unknown-${Date.now()}`;
     
     try {
       // Use timestamp for uniqueness
@@ -286,8 +493,11 @@ processStreamUpdate() {
       return `r${Date.now()}`;
     }
   }
-  
+    
+  // Simple hash function for text
   simpleHash(str) {
+    if (!str) return '0';
+    
     let hash = 0;
     for (let i = 0; i < str.length; i++) {
       const char = str.charCodeAt(i);
@@ -296,8 +506,20 @@ processStreamUpdate() {
     }
     return Math.abs(hash).toString(36);
   }
-  
-  async sendStreamChunk(text, isComplete, responseId) {
+    
+  // Improved sendStreamChunk with retry mechanism
+  async sendStreamChunk(text, isComplete, responseId, retryCount = 0) {
+    if (!text || text.trim().length === 0) {
+      console.log(`🔄 Skipping empty chunk ${responseId}`);
+      return { success: false, error: "Empty text" };
+    }
+    
+    // Don't retry endlessly
+    if (retryCount > 3) {
+      console.error(`❌ Giving up after ${retryCount} retries for ${responseId}`);
+      return { success: false, error: "Max retries exceeded" };
+    }
+
     const payload = {
       text: text,
       is_complete: isComplete,
@@ -305,39 +527,101 @@ processStreamUpdate() {
       timestamp: Date.now(),
       response_id: responseId
     };
-  
+
     console.log(`🔄 Sending chunk ${responseId}: ${text.substring(0, 50)}... (total: ${text.length} chars)`);
-  
+
     // Add a small delay to let UI settle
     await new Promise(resolve => setTimeout(resolve, 200));
-    return this.sendToServer("/stream", payload);
-  }
-  
-  async sendToServer(endpoint, data) {
+    
     try {
+      const result = await this.sendToServer("/stream", payload);
+      
+      if (result.success) {
+        // Update last processed response ID only if successful
+        this.lastProcessedResponseId = responseId;
+        return result;
+      } else {
+        // If server returned error but is reachable, retry
+        console.warn(`⚠️ Server returned error for ${responseId}: ${result.error}`);
+        
+        if (retryCount < 3) {
+          console.log(`⚠️ Retrying in 500ms... (attempt ${retryCount + 1})`);
+          await new Promise(resolve => setTimeout(resolve, 500));
+          return this.sendStreamChunk(text, isComplete, responseId, retryCount + 1);
+        }
+        
+        return result;
+      }
+    } catch (error) {
+      console.error(`❌ Failed to send chunk ${responseId}:`, error);
+      
+      // Store failed request for potential retry
+      this.failedRequests.push({
+        text,
+        isComplete,
+        responseId,
+        timestamp: Date.now()
+      });
+      
+      // If it seems like a connection issue and we have retries left, try again
+      if (retryCount < 3) {
+        console.log(`⚠️ Connection error, retrying in 1000ms... (attempt ${retryCount + 1})`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        return this.sendStreamChunk(text, isComplete, responseId, retryCount + 1);
+      }
+      
+      return { success: false, error: error.toString() };
+    }
+  }
+    
+  // More resilient server communication
+  async sendToServer(endpoint, data) {
+    if (!this.serverHealthy && endpoint !== "/health") {
+      console.warn(`⚠️ Server appears to be down, not sending to ${endpoint}`);
+      return { success: false, error: "Server is not responding" };
+    }
+    
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+      
       const response = await fetch(`http://127.0.0.1:5000${endpoint}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(data)
+        body: JSON.stringify(data),
+        signal: controller.signal
       });
+      
+      clearTimeout(timeoutId);
       
       const result = await response.json();
       
       if (result.success) {
-        console.log(`✅ Server response: ${endpoint}`, result);
+        console.log(`✅ Server response: ${endpoint}`, 
+          endpoint === "/stream" ? 
+            `${result.processed ? "Processed" : "Not processed"} ${data.text?.length || 0} chars` : 
+            result
+        );
       } else {
         console.error(`❌ Server error: ${endpoint}`, result.error);
       }
       
       return result;
     } catch (error) {
+      // Handle aborts separately
+      if (error.name === 'AbortError') {
+        console.error(`⏱️ Request timeout: ${endpoint}`);
+        this.serverHealthy = false; // Mark server as potentially down
+        return { success: false, error: "Request timeout" };
+      }
+      
       console.error(`❌ Request failed: ${endpoint}`, error);
       return { success: false, error: error.message };
     }
   }
-  
+    
   // Manual TTS for testing
   async sendManualTTS(text) {
     console.log(`📤 Manual TTS: ${text.substring(0, 50)}...`);
@@ -354,8 +638,7 @@ processStreamUpdate() {
   }
 }
 
-  
-// Control Panel with improved aesthetics from original content.js
+// Control Panel
 class TTSControlPanel {
   constructor(monitor) {
     this.monitor = monitor;
@@ -418,6 +701,15 @@ class TTSControlPanel {
     `;
     panel.appendChild(lockDiv);
     
+    // Server status indicator
+    const serverStatus = document.createElement('div');
+    serverStatus.id = 'server-status';
+    serverStatus.style.cssText = `
+      font-size: 10px; color: #666; text-align: center; margin-top: 2px;
+    `;
+    serverStatus.textContent = 'Checking server status...';
+    panel.appendChild(serverStatus);
+    
     // Conversation mode toggle (improved styling)
     this.addConversationModeToggle(panel);
     
@@ -468,146 +760,8 @@ class TTSControlPanel {
     previewArea.appendChild(previewText);
     panel.appendChild(previewArea);
 
-
-    function createAnimatedTTSButton() {
-      const button = document.createElement('button');
-      button.id = 'claude-tts-btn';
-      button.style.cssText = `
-        width: 60px; height: 60px; border-radius: 50%;
-        background-color: #1a1a1a; border: 1px solid #333;
-        cursor: pointer; position: relative; overflow: hidden;
-        transition: all 0.2s ease;
-      `;
-      
-      // Load and position the SVGs
-      const svgs = [
-        { name: 'claudestar.svg', class: 'star-element' },
-        { name: 'small.svg', class: 'arc1-element' },
-        { name: 'medium.svg', class: 'arc2-element' },
-        { name: 'large.svg', class: 'arc3-element' }
-      ];
-      
-      svgs.forEach((svg, index) => {
-        const img = document.createElement('img');
-        img.src = chrome.runtime.getURL(`icons/svgs/${svg.name}`);
-        img.className = svg.class;
-        img.style.cssText = `
-          position: absolute;
-          top: 50%;
-          left: 50%;
-          transform: translate(-50%, -50%);
-          z-index: ${10 - index};
-          width: 20px;
-          height: 20px;
-        `;
-        
-        img.onerror = () => {
-          console.error(`Failed to load SVG: ${svg.name}`);
-        };
-        
-        button.appendChild(img);
-      });
-      
-      // Add the color filters and animations
-      const style = document.createElement('style');
-      style.textContent = `
-        .star-element {
-          filter: brightness(0) saturate(100%) invert(48%) sepia(89%) saturate(2074%) hue-rotate(359deg) brightness(95%) contrast(90%);
-          animation: starWiggle 3s ease-in-out infinite;
-        }
-        
-        .arc1-element, .arc2-element, .arc3-element {
-          filter: brightness(0) saturate(100%) invert(100%);
-        }
-        
-        .arc1-element { animation: arc1Wiggle 2.5s ease-in-out infinite; }
-        .arc2-element { animation: arc2Wiggle 3.2s ease-in-out infinite; }
-        .arc3-element { animation: arc3Wiggle 4s ease-in-out infinite; }
-        
-        @keyframes starWiggle {
-          0%, 100% { transform: translate(-50%, -50%) rotate(0deg); }
-          25% { transform: translate(-50%, -50%) rotate(2deg); }
-          75% { transform: translate(-50%, -50%) rotate(-2deg); }
-        }
-        
-        @keyframes arc1Wiggle {
-          0%, 100% { transform: translate(-50%, -50%) rotate(0deg); }
-          33% { transform: translate(-50%, -50%) rotate(3deg); }
-          66% { transform: translate(-50%, -50%) rotate(-3deg); }
-        }
-        
-        @keyframes arc2Wiggle {
-          0%, 100% { transform: translate(-50%, -50%) rotate(0deg); }
-          40% { transform: translate(-50%, -50%) rotate(-2deg); }
-          80% { transform: translate(-50%, -50%) rotate(2deg); }
-        }
-        
-        @keyframes arc3Wiggle {
-          0%, 100% { transform: translate(-50%, -50%) rotate(0deg); }
-          50% { transform: translate(-50%, -50%) rotate(4deg); }
-        }
-      `;
-      
-      document.head.appendChild(style);
-      return button;
-}
-
-    // Fix your animations to include the centering transform:
-    @keyframes starWiggle {
-      0%, 100% { transform: translate(-50%, -50%) rotate(0deg); }
-      25% { transform: translate(-50%, -50%) rotate(2deg); }
-      75% { transform: translate(-50%, -50%) rotate(-2deg); }
-    }
-     
-      // Add animations and color filters
-      const style = document.createElement('style');
-      style.textContent = `
-        /* Color filters */
-        .star-element {
-          /* Filter for #d3623d (orange-red color) */
-          filter: brightness(0) saturate(100%) invert(48%) sepia(89%) saturate(2074%) hue-rotate(359deg) brightness(95%) contrast(90%);
-          animation: starWiggle 3s ease-in-out infinite;
-        }
-        
-        .arc1-element, .arc2-element, .arc3-element {
-          /* Filter for white */
-          filter: brightness(0) saturate(100%) invert(100%);
-        }
-        
-        .arc1-element { animation: arc1Wiggle 2.5s ease-in-out infinite; }
-        .arc2-element { animation: arc2Wiggle 3.2s ease-in-out infinite; }
-        .arc3-element { animation: arc3Wiggle 4s ease-in-out infinite; }
-        
-        /* Animations */
-        @keyframes starWiggle {
-          0%, 100% { transform: rotate(0deg); }
-          25% { transform: rotate(2deg); }
-          75% { transform: rotate(-2deg); }
-        }
-        
-        @keyframes arc1Wiggle {
-          0%, 100% { transform: rotate(0deg); }
-          33% { transform: rotate(3deg); }
-          66% { transform: rotate(-3deg); }
-        }
-        
-        @keyframes arc2Wiggle {
-          0%, 100% { transform: rotate(0deg); }
-          40% { transform: rotate(-2deg); }
-          80% { transform: rotate(2deg); }
-        }
-        
-        @keyframes arc3Wiggle {
-          0%, 100% { transform: rotate(0deg); }
-          50% { transform: rotate(4deg); }
-        }
-      `;
-      
-      document.head.appendChild(style);
-      return button;
-    }
-    // Now create and add the animated TTS button
-    const ttsBtn = createAnimatedTTSButton();
+    // Create the TTS button
+    const ttsBtn = this.createAnimatedTTSButton();
     ttsBtn.onclick = () => {
       if (this.currentText) {
         this.monitor.sendManualTTS(this.currentText);
@@ -645,14 +799,102 @@ class TTSControlPanel {
     document.body.appendChild(panel);
     
     if (this.monitor.conversationMode) {
-      console.log("🐛 Attempting to start monitoring...");
+      console.log("🔄 Starting monitoring from panel creation");
       this.monitor.startMonitoring();
-      console.log("🐛 Start monitoring called");
       this.updateStatus('Monitoring active');
     }
     
     // Update processing lock status periodically
     setInterval(() => this.updateProcessingStatus(), 1000);
+    
+    // Update server status periodically
+    setInterval(() => this.updateServerStatus(), 2000);
+  }
+  
+  createAnimatedTTSButton() {
+    const button = document.createElement('button');
+    button.id = 'claude-tts-btn';
+    button.style.cssText = `
+      width: 60px; height: 60px; border-radius: 50%;
+      background-color: #1a1a1a; border: 1px solid #333;
+      cursor: pointer; position: relative; overflow: hidden;
+      transition: all 0.2s ease;
+    `;
+    
+    // Load and position the SVGs
+    const svgs = [
+      { name: 'claudestar.svg', class: 'star-element' },
+      { name: 'small.svg', class: 'arc1-element' },
+      { name: 'medium.svg', class: 'arc2-element' },
+      { name: 'large.svg', class: 'arc3-element' }
+    ];
+    
+    svgs.forEach((svg, index) => {
+      const img = document.createElement('img');
+      img.src = chrome.runtime.getURL(`icons/svgs/${svg.name}`);
+      img.className = svg.class;
+      img.style.cssText = `
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        z-index: ${10 - index};
+        width: 20px;
+        height: 20px;
+      `;
+      
+      img.onerror = () => {
+        console.error(`Failed to load SVG: ${svg.name}`);
+      };
+      
+      button.appendChild(img);
+    });
+    
+    // Add the color filters and animations
+    const styleId = 'claude-tts-animations';
+    if (!document.getElementById(styleId)) {
+      const style = document.createElement('style');
+      style.id = styleId;
+      style.textContent = `
+        .star-element {
+          filter: brightness(0) saturate(100%) invert(48%) sepia(89%) saturate(2074%) hue-rotate(359deg) brightness(95%) contrast(90%);
+          animation: starWiggle 3s ease-in-out infinite;
+        }
+        
+        .arc1-element, .arc2-element, .arc3-element {
+          filter: brightness(0) saturate(100%) invert(100%);
+        }
+        
+        .arc1-element { animation: arc1Wiggle 2.5s ease-in-out infinite; }
+        .arc2-element { animation: arc2Wiggle 3.2s ease-in-out infinite; }
+        .arc3-element { animation: arc3Wiggle 4s ease-in-out infinite; }
+        
+        @keyframes starWiggle {
+          0%, 100% { transform: translate(-50%, -50%) rotate(0deg); }
+          25% { transform: translate(-50%, -50%) rotate(2deg); }
+          75% { transform: translate(-50%, -50%) rotate(-2deg); }
+        }
+        
+        @keyframes arc1Wiggle {
+          0%, 100% { transform: translate(-50%, -50%) rotate(0deg); }
+          33% { transform: translate(-50%, -50%) rotate(3deg); }
+          66% { transform: translate(-50%, -50%) rotate(-3deg); }
+        }
+        
+        @keyframes arc2Wiggle {
+          0%, 100% { transform: translate(-50%, -50%) rotate(0deg); }
+          40% { transform: translate(-50%, -50%) rotate(-2deg); }
+          80% { transform: translate(-50%, -50%) rotate(2deg); }
+        }
+        
+        @keyframes arc3Wiggle {
+          0%, 100% { transform: translate(-50%, -50%) rotate(0deg); }
+          50% { transform: translate(-50%, -50%) rotate(4deg); }
+        }
+      `;
+      document.head.appendChild(style);
+    }
+    return button;
   }
   
   addConversationModeToggle(container) {
@@ -719,10 +961,11 @@ class TTSControlPanel {
       return;
     }
     
+    // Use the simple extractText method
     const text = this.monitor.extractText(response);
     
     if (!text) {
-      this.updatePreview('❌ Failed to extract valid text (possible corruption)');
+      this.updatePreview('❌ Failed to extract valid text');
       this.updateStatus('Text extraction failed');
       return;
     }
@@ -782,10 +1025,29 @@ class TTSControlPanel {
       }
     }
   }
+  
+  updateServerStatus() {
+    const statusDiv = document.getElementById('server-status');
+    if (statusDiv && this.monitor) {
+      if (this.monitor.serverHealthy) {
+        statusDiv.textContent = '🟢 Server online';
+        statusDiv.style.color = '#4ade80';
+      } else {
+        statusDiv.textContent = '🔴 Server offline';
+        statusDiv.style.color = '#ff6b6b';
+      }
+      
+      // Show failed requests if any
+      if (this.monitor.failedRequests.length > 0) {
+        statusDiv.textContent += ` (${this.monitor.failedRequests.length} pending)`;
+      }
+    }
+  }
 
   stopAudio() {
-    // Add your stop audio implementation here
-    this.monitor.sendToServer("/stop", { timestamp: Date.now() });
+    // Updated to match server endpoint
+    this.monitor.sendToServer("/stop_audio", { timestamp: Date.now() });
+    this.updateStatus('Audio stopped');
   }
 }
 
