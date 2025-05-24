@@ -87,6 +87,12 @@ async def handle_stream():
         # Use a timeout to ensure the request doesn't hang indefinitely
         try:
             await asyncio.wait_for(task, timeout=10.0)
+            
+            # For final chunks, wait for audio to complete before returning
+            if is_complete and audio_manager:
+                logger.info(f"Final chunk detected for {response_id}, waiting for audio completion")
+                await audio_manager.wait_for_audio_completion()
+                logger.info(f"Audio completed for final chunk {response_id}")
         except asyncio.TimeoutError:
             logger.warning(f"Processing timeout for response {response_id}, continuing in background")
             # Let it continue in the background
