@@ -14,7 +14,7 @@ class ClaudeStreamMonitor {
     this.currentResponseText = ""; // Mirrors currentResponseElement.textContent
     this.lastSentLength = 0; // How much of currentResponseText has been processed (sent or skipped)
     this.chunkCounterForElement = 0; // Sequence number for chunks of currentResponseElement
-
+    this.lastProcessedText = "";
     this.isRetrying = false; 
     this.serverHealthy = true;
     this.failedRequests = []; // Stores requests that failed due to server/network issues
@@ -144,12 +144,12 @@ class ClaudeStreamMonitor {
       const messageDiv = latest.querySelector('.font-claude-message');
       return messageDiv || latest; 
     }
-    
+
     const completedElements = document.querySelectorAll('.font-claude-message');
     if (completedElements.length > 0) {
       return completedElements[completedElements.length - 1];
     }
-    
+
     const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
     if (assistantMessages.length > 0) {
         const lastAssistantMessage = assistantMessages[assistantMessages.length - 1];
@@ -216,6 +216,7 @@ class ClaudeStreamMonitor {
       }
     });
     
+    // Set up observer first
     const possibleContainers = [
       document.evaluate('/html/body/div[2]/div[2]/div/div[1]/div/div/div[1]', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue,
       document.querySelector('main'),
@@ -228,7 +229,15 @@ class ClaudeStreamMonitor {
     if (target) {
       this.observer.observe(target, { childList: true, subtree: true, characterData: true });
       console.log("✅ Observer attached to container:", target);
-      this.processStreamUpdate(); 
+      
+      // Only try to process existing content if there actually IS existing content
+      const existingResponse = this.findClaudeResponse();
+      if (existingResponse) {
+        console.log("🔍 Found existing response, processing...");
+        this.processStreamUpdate(); 
+      } else {
+        console.log("📝 No existing response found - observer ready for new content");
+      }
     } else {
       console.error("❌ Could not find any suitable container for observing");
     }
@@ -251,190 +260,549 @@ class ClaudeStreamMonitor {
     }, 250); 
   }
     
+// Add this new method to ClaudeStreamMonitor class
+findCompleteParagraph(text) {
+  // First check for standard paragraph breaks
+  const paragraphBreak = text.match(/^(.*?\.)\s+(?=[A-Z]|$)/s);
+  
+  if (paragraphBreak && paragraphBreak[0].trim().length > 20) {
+    return {
+      found: true,
+      text: paragraphBreak[0].trim(),
+      endPosition: paragraphBreak[0].length
+    };
+  }
+
+  // Look for natural breaks if paragraph not found (sentences, punctuation)
+  if (text.length > 100) {
+    // For longer text without paragraph breaks, try to find sentence boundaries
+    const sentenceMatch = this.findCompleteSentence(text);
+    if (sentenceMatch.found) {
+      return sentenceMatch;
+    }
+
+    // If no sentence boundary, look for any reasonable punctuation break
+    const punctuationBreak = text.match(/^.{60,}?[.!?:;]\s+/s);
+    if (punctuationBreak) {
+      return {
+        found: true,
+        text: punctuationBreak[0].trim(),
+        endPosition: punctuationBreak[0].length
+      };
+    }
+  }
+
+  // For very long text without any breaks, force a break at a reasonable length
+  if (text.length > 300) {
+    const forcedBreak = text.substring(0, 250).match(/^.{200,250}[\s,.!?:;]/);
+    if (forcedBreak) {
+      return {
+        found: true,
+        text: forcedBreak[0].trim(),
+        endPosition: forcedBreak[0].length
+      };
+    }
+
+    // Last resort: just take the first 250 characters
+    return {
+      found: true,
+      text: text.substring(0, 250).trim(),
+      endPosition: 250
+    };
+  }
+
+  // No suitable break found yet, need more text
+  return { found: false };
+}
+
+findNextBoundary(text, startPosition) {
+  const textToCheck = text.substring(startPosition);
+  const boundaries = [
+    // Code blocks with triple backticks
+    { 
+      name: 'code_block', 
+      pattern: /```/,
+      handler: (match, fullText, absMatchStart) => {
+        // Find the closing triple backticks
+        const restOfText = fullText.substring(absMatchStart + 3);
+        const closingIndex = restOfText.indexOf('```');
+        
+        if (closingIndex !== -1) {
+          const closingPos = absMatchStart + 3 + closingIndex + 3;
+          const codeContent = fullText.substring(absMatchStart, closingPos);
+          
+          console.log(`🚧 CODE BLOCK found from ${absMatchStart} to ${closingPos}, length: ${codeContent.length}`);
+          console.log(`🚧 Code content: "${codeContent.substring(0, Math.min(40, codeContent.length))}..."`);
+          
+          return { 
+            position: absMatchStart, 
+            endPosition: closingPos, 
+            type: 'code_block',
+            content: codeContent // Store the content for debugging
+          };
+        }
+        
+        // If no closing tag found, skip to the end of text
+        console.log(`⚠️ Unclosed code block found at ${absMatchStart}, skipping to end`);
+        return { 
+          position: absMatchStart, 
+          endPosition: fullText.length, 
+          type: 'code_block_unclosed' 
+        };
+      }
+    },
+    
+    // Extended thinking window
+    { 
+      name: 'thinking_section', 
+      pattern: /<thinking>/i,
+      handler: (match, fullText, absMatchStart) => {
+        const closingMatch = /<\/thinking>/i.exec(fullText.substring(absMatchStart));
+        if (closingMatch) {
+          return { 
+            position: absMatchStart, 
+            endPosition: absMatchStart + closingMatch.index + closingMatch[0].length, 
+            type: 'thinking_section' 
+          };
+        }
+        return { 
+          position: absMatchStart, 
+          endPosition: fullText.length, 
+          type: 'thinking_section_unclosed' 
+        };
+      }
+    },
+    
+    // Function calls artifact
+    { 
+      name: 'function_calls', 
+      pattern: /<function_calls>/i,
+      handler: (match, fullText, absMatchStart) => {
+        const closingMatch = /<\/antml:function_calls>/i.exec(fullText.substring(absMatchStart));
+        if (closingMatch) {
+          return { 
+            position: absMatchStart, 
+            endPosition: absMatchStart + closingMatch.index + closingMatch[0].length, 
+            type: 'function_calls_artifact' 
+          };
+        }
+        return { 
+          position: absMatchStart, 
+          endPosition: fullText.length, 
+          type: 'function_calls_artifact_unclosed' 
+        };
+      }
+    },
+    
+    // Function results
+    { 
+      name: 'function_results', 
+      pattern: /<function_results>/i,
+      handler: (match, fullText, absMatchStart) => {
+        const closingMatch = /<\/function_results>/i.exec(fullText.substring(absMatchStart));
+        if (closingMatch) {
+          return { 
+            position: absMatchStart, 
+            endPosition: absMatchStart + closingMatch.index + closingMatch[0].length, 
+            type: 'function_results' 
+          };
+        }
+        return { 
+          position: absMatchStart, 
+          endPosition: fullText.length, 
+          type: 'function_results_unclosed' 
+        };
+      }
+    },
+    
+    // Citation tags
+    { 
+      name: 'citation', 
+      pattern: /]*>/i,
+      handler: (match, fullText, absMatchStart) => {
+        const closingMatch = /<\/antml:cite>/i.exec(fullText.substring(absMatchStart));
+        if (closingMatch) {
+          return { 
+            position: absMatchStart, 
+            endPosition: absMatchStart + closingMatch.index + closingMatch[0].length, 
+            type: 'citation' 
+          };
+        }
+        return { 
+          position: absMatchStart, 
+          endPosition: fullText.length, 
+          type: 'citation_unclosed' 
+        };
+      }
+    },
+    
+    // Modified inline code handling - ONLY skip multiline code blocks with backticks
+    // For inline code like `findNextBoundary()`, we'll leave it for TTS
+    { 
+      name: 'multiline_inline_code', 
+      pattern: /`[^`\n]+\n[^`]*`/,  // Only match if there's a newline between backticks
+      handler: (match, fullText, absMatchStart) => {
+        return { 
+          position: absMatchStart, 
+          endPosition: absMatchStart + match[0].length, 
+          type: 'multiline_inline_code' 
+        };
+      }
+    },
+    
+    // Generic artifact blocks
+    { 
+      name: 'artifact_block', 
+      pattern: /\[artifact[^\]]*\]/i,
+      handler: (match, fullText, absMatchStart) => {
+        // For simple artifact markers, just skip the marker itself
+        return { 
+          position: absMatchStart, 
+          endPosition: absMatchStart + match[0].length, 
+          type: 'artifact_block' 
+        };
+      }
+    },
+    
+    // HTML-like tags (generic handler)
+    { 
+      name: 'html_tag', 
+      pattern: /<[a-z][a-z0-9]*(?:\s+[^>]*)?>/i,
+      handler: (match, fullText, absMatchStart) => {
+        // Extract tag name
+        const tagMatch = match[0].match(/<([a-z][a-z0-9]*)/i);
+        if (!tagMatch) {
+          return { 
+            position: absMatchStart, 
+            endPosition: absMatchStart + match[0].length, 
+            type: 'html_tag_unknown' 
+          };
+        }
+        
+        const tagName = tagMatch[1];
+        const closingTagPattern = new RegExp(`<\\/${tagName}>`, 'i');
+        const closingMatch = closingTagPattern.exec(fullText.substring(absMatchStart + match[0].length));
+        
+        if (closingMatch) {
+          const closingPos = absMatchStart + match[0].length + closingMatch.index + closingMatch[0].length;
+          return { 
+            position: absMatchStart, 
+            endPosition: closingPos, 
+            type: 'html_tag_' + tagName.toLowerCase() 
+          };
+        }
+        
+        // If no closing tag found, just skip the opening tag
+        return { 
+          position: absMatchStart, 
+          endPosition: absMatchStart + match[0].length, 
+          type: 'html_tag_unclosed_' + tagName.toLowerCase() 
+        };
+      }
+    }
+  ];
+  
+  let nearestBoundary = { found: false, position: Infinity, endPosition: Infinity, type: '' };
+  
+  // Find the nearest boundary
+  for (const boundaryDef of boundaries) {
+    const match = boundaryDef.pattern.exec(textToCheck);
+    if (match) {
+      const absolutePosition = startPosition + match.index;
+      if (absolutePosition < nearestBoundary.position) {
+        const boundaryDetails = boundaryDef.handler(match, text, absolutePosition);
+        nearestBoundary = { found: true, ...boundaryDetails };
+      }
+    }
+  }
+  
+  if (nearestBoundary.found) {
+    return nearestBoundary;
+  }
+  
+  return { found: false };
+}
+
+// Replace the ENTIRE processStreamUpdate method with this fixed version
 async processStreamUpdate() {
   if (!this.conversationMode) {
     if (this.processingLock) this.processingLock = false;
     return;
   }
   
-  if (this.processingLock) {
-    return;
-  }
-  
+  if (this.processingLock) return;
   this.processingLock = true;
   
   try {
+    // Find the current Claude response
     const responseElement = this.findClaudeResponse();
     if (!responseElement) {
-      if (this.currentResponseElement) {
-          this.sendFinalChunk();
-      }
       this.processingLock = false;
       return;
     }
     
-    if (responseElement !== this.currentResponseElement) {
-      if (this.currentResponseElement) {
-        this.sendFinalChunk(); 
-      }
-      this.currentResponseElement = responseElement;
-      this.currentResponseText = ""; 
-      this.lastSentLength = 0;
-      this.chunkCounterForElement = 0;
-      this.processedChunks.clear(); 
-      console.log("🔄 Switched to new response element. State reset for new element.");
-    }
-
-    const fullText = responseElement.textContent || "";
-    this.currentResponseText = fullText; 
-
-    const isStreaming = this.isClaudeTyping(responseElement);
+    // Generate IDs FIRST before using them for comparison
+    const currentId = this.generateResponseId(responseElement);
+    const currentTimestamp = currentId.split('-')[0];
     
-    if (this.lastSentLength >= fullText.length && isStreaming) {
-        this.processingLock = false;
-        return;
-    }
-     if (this.lastSentLength >= fullText.length && !isStreaming) {
-        this.processingLock = false;
-        return;
-    }
-
-    let currentParsePos = this.lastSentLength; 
-
-    while (currentParsePos < fullText.length) {
-      const boundary = this.findNextBoundary(fullText, currentParsePos);
-
-      if (boundary.found && boundary.position === currentParsePos) {
-        console.log(`🚧 Boundary ${boundary.type} found at current position ${currentParsePos}. Skipping to ${boundary.endPosition}.`);
-        currentParsePos = boundary.endPosition;
-        this.lastSentLength = currentParsePos; 
-        continue; 
-      }
-
-      let textSegmentToAnalyze;
-      let endOfThisSegmentInFullText;
-
-      if (boundary.found) {
-        textSegmentToAnalyze = fullText.substring(currentParsePos, boundary.position);
-        endOfThisSegmentInFullText = boundary.position;
-      } else {
-        textSegmentToAnalyze = fullText.substring(currentParsePos);
-        endOfThisSegmentInFullText = fullText.length;
-      }
-
-      if (textSegmentToAnalyze.trim().length > 0) {
-        let textToSend = textSegmentToAnalyze.trim();
-        let sendNow = false;
-        let markCompleteOnSend = !isStreaming && (endOfThisSegmentInFullText === fullText.length); 
-
-        if (isStreaming) {
-          const sentenceMatch = this.findCompleteSentence(textSegmentToAnalyze); 
-          if (sentenceMatch.found) {
-            textToSend = sentenceMatch.text; 
-            currentParsePos += sentenceMatch.endPosition; 
-            sendNow = true;
-            markCompleteOnSend = false; 
-          } else if (!boundary.found && textSegmentToAnalyze.length < 70) { 
-            break; 
-          } else {
-            textToSend = textSegmentToAnalyze.trim();
-            currentParsePos += textSegmentToAnalyze.length; 
-            sendNow = true;
-            markCompleteOnSend = !isStreaming && (currentParsePos === fullText.length);
-          }
-        } else {
-          textToSend = textSegmentToAnalyze.trim();
-          currentParsePos += textSegmentToAnalyze.length; 
-          sendNow = true;
-          markCompleteOnSend = (currentParsePos === fullText.length); 
-        }
-
-        if (sendNow && textToSend.length > 0) {
-          const baseId = this.generateResponseId(this.currentResponseElement);
-          const chunkIdSuffix = markCompleteOnSend ? "final" : "stream";
-          const responseId = `${baseId}-${chunkIdSuffix}-${this.chunkCounterForElement++}`;
-          
-          if (!this.processedChunks.has(responseId) || this.processedChunks.get(responseId) !== textToSend) {
-            console.log(`📤 Sending ${markCompleteOnSend ? "final" : "stream"} chunk: "${textToSend.substring(0,50)}..." (Len: ${textToSend.length}) ID: ${responseId}`);
-            await this.sendStreamChunk(textToSend, markCompleteOnSend, responseId);
-            this.processedChunks.set(responseId, textToSend);
-            this.lastSentLength = currentParsePos; 
-          } else {
-            console.log(`⏭️ Skipping already processed/sent chunk: ${responseId}`);
-            this.lastSentLength = currentParsePos; 
-          }
-        } else if (textToSend.length === 0 && currentParsePos < endOfThisSegmentInFullText) {
-            currentParsePos = endOfThisSegmentInFullText;
-            this.lastSentLength = currentParsePos;
-        }
-
-      } else {
-        currentParsePos = endOfThisSegmentInFullText;
-        this.lastSentLength = currentParsePos; 
-      }
+    // Check if we've switched to a new response element
+    if (responseElement !== this.currentResponseElement) {
+      const prevId = this.currentResponseElement ? 
+                    this.generateResponseId(this.currentResponseElement) : null;
+      const prevTimestamp = prevId ? prevId.split('-')[0] : null;
       
-      if (this.lastSentLength === currentParsePos && currentParsePos < fullText.length && textSegmentToAnalyze.length === 0 && !(boundary.found && boundary.position === currentParsePos)) {
-           if (fullText.substring(currentParsePos).trim().length === 0) { 
-               this.lastSentLength = fullText.length;
-               currentParsePos = fullText.length;
-           } else {
-               break; 
-           }
+      if (prevTimestamp && currentTimestamp === prevTimestamp) {
+        console.log(`🔄 DOM element changed but same logical response (${currentTimestamp})`);
+        // Just update the element reference, keep other state
+        this.currentResponseElement = responseElement;
+        // Don't reset other variables
+      } else {
+        // Truly new response
+        console.log("🔄 NEW LOGICAL RESPONSE DETECTED");
+        if (this.currentResponseElement) {
+          console.log("✅ Sending final chunk for previous response element");
+          this.sendFinalChunk(); 
+        }
+        this.currentResponseElement = responseElement;
+        this.currentResponseText = ""; 
+        this.lastSentLength = 0;
+        this.chunkCounterForElement = 0;
+        this.processedChunks.clear();
+        this.lastProcessedText = "";
+        this.lastCleanedText = ""; // Reset the cleaned text tracking too
+        console.log("🔄 Switched to new response element. State reset for new element.");
       }
-    } 
-
-    if (!isStreaming && this.lastSentLength >= fullText.length) {
-      // console.log(`✅ Fully processed response element ${this.generateResponseId(this.currentResponseElement)}.`);
     }
 
+    // Get the current full text from the element
+    const currentFullText = responseElement.textContent || "";
+    
+    // If nothing new to process, exit
+    if (currentFullText === this.currentResponseText) {
+      this.processingLock = false;
+      return;
+    }
+    
+    const isStreaming = this.isClaudeTyping(responseElement);
+    console.log(`📝 Processing response element: ${currentId}`);
+    
+    // Find all code blocks and artifacts in the current response element
+    const codeBlocksAndArtifacts = [];
+    
+    // Find code blocks (<pre> elements)
+    const preElements = responseElement.querySelectorAll('pre');
+    for (const preEl of preElements) {
+      codeBlocksAndArtifacts.push({
+        element: preEl,
+        text: preEl.textContent,
+        type: 'code_block'
+      });
+      console.log(`🔍 Found code block: "${preEl.textContent.substring(0, 30)}..."`);
+    }
+    
+    // Find artifact blocks (buttons and special elements)
+    const artifactSelectors = [
+      '.artifact-block-cell',
+      '[data-artifact-title]',
+      'button.flex.text-left.font-styrene',
+      '[aria-label="Preview contents"]',
+      'div[class*="transition-all duration"]',
+      'div.font-tiempos'
+    ];
+    
+    for (const selector of artifactSelectors) {
+      const artifactElements = responseElement.querySelectorAll(selector);
+      for (const artifactEl of artifactElements) {
+        codeBlocksAndArtifacts.push({
+          element: artifactEl,
+          text: artifactEl.textContent,
+          type: 'artifact'
+        });
+        console.log(`🔍 Found artifact: "${artifactEl.textContent.substring(0, 30)}..."`);
+      }
+    }
+    
+    // Process the entire text
+    let textToProcess = currentFullText;
+    
+    // Remove all code blocks and artifacts from the text to process
+    for (const item of codeBlocksAndArtifacts) {
+      const itemText = item.text;
+      // Only replace if the text exists in our processing text
+      if (itemText && textToProcess.includes(itemText)) {
+        textToProcess = textToProcess.replace(itemText, "\n\n");
+        console.log(`✂️ Removed ${item.type} from text: "${itemText.substring(0, 30)}..."`);
+      }
+    }
+    
+    // Clean up the text (preserve paragraph breaks)
+    textToProcess = textToProcess.replace(/\n\s*\n/g, '§PARAGRAPH§')  // Mark paragraphs
+                              .replace(/\s+/g, ' ')  // Normalize other whitespace
+                              .replace(/§PARAGRAPH§/g, '\n\n')  // Restore paragraphs
+                              .trim();
+    textToProcess = textToProcess.replace(/(Analyzing|Thinking|Parsing|Considering|Evaluating|Pondering)[^.]*\./gi, '').trim();
+    
+    // Check if we have nothing new after cleaning
+    if (textToProcess.length === 0) {
+      console.log("🚫 No text content after removing code blocks");
+      this.processingLock = false;
+      return;
+    }
+    
+    // Check if it's exactly the same text we already processed
+    if (textToProcess === this.lastProcessedText) {
+      console.log("🚫 Already processed this exact text - skipping");
+      this.processingLock = false;
+      return;
+    }
+    
+    // Determine what text to actually send, handling code block changes
+    let newText = "";
+    
+    // IMPORTANT NEW LOGIC: Compare with last cleaned text to handle code block additions
+    if (this.lastCleanedText && textToProcess === this.lastCleanedText) {
+      // Same text after code removal - nothing new to process
+      console.log("🔄 Only code blocks changed, no new text to process");
+      this.processingLock = false;
+      return;
+    } else if (this.lastCleanedText && textToProcess.startsWith(this.lastCleanedText)) {
+      // Text has grown but starts with previous cleaned text - only send the new part
+      newText = textToProcess.substring(this.lastCleanedText.length).trim();
+      console.log(`🔍 Text extended after code blocks, only sending new part: "${newText.substring(0, 40)}..."`);
+    } else if (this.lastCleanedText && this.lastCleanedText.startsWith(textToProcess)) {
+      // Text is shorter than before (rare case) - skip as it's likely just a UI update
+      console.log("⚠️ Text is shorter after code blocks removed - likely just a UI update");
+      this.processingLock = false;
+      return;
+    } else if (this.currentResponseText && textToProcess.startsWith(this.currentResponseText)) {
+      // Normal case without code blocks - text has grown
+      newText = textToProcess.substring(this.currentResponseText.length).trim();
+      console.log(`🔍 Text extended normally: "${newText.substring(0, 40)}..."`);
+    } else {
+      // Completely different text - do similarity check
+      console.log(`⚠️ Text doesn't match previous content - processing full text`);
+      console.log(`Previous: "${this.currentResponseText.substring(0, 40)}..."`);
+      console.log(`Current: "${textToProcess.substring(0, 40)}..."`);
+      
+      // Check if this is a completely new response or if we should append
+      if (this.currentResponseText.length > 0) {
+        // This could be a case where the text was edited or changed
+        // Check for similarity
+        const similarityThreshold = 0.7; // 70% similarity
+        const similarity = this.calculateSimilarity(this.currentResponseText, textToProcess);
+        
+        if (similarity > similarityThreshold) {
+          console.log(`⚠️ Text changed but similar (${similarity.toFixed(2)}), treating as replacement`);
+          // Treat as a replacement of the entire content
+          newText = textToProcess;
+          this.currentResponseText = ""; // Reset the current text
+        } else {
+          console.log(`⚠️ Text completely different (${similarity.toFixed(2)}), sending full text`);
+          newText = textToProcess;
+        }
+      } else {
+        newText = textToProcess;
+      }
+    }
+    
+    // Update tracking for future comparisons
+    this.lastCleanedText = textToProcess;
+    
+    // Only process if we have meaningful new text
+    if (newText.length > 0) {
+      // Check if we're at end of response or at a code block boundary
+      const isAtCodeBlockBoundary = codeBlocksAndArtifacts.length > 0;
+      
+      if (isStreaming) {
+        // Check if text contains multiple paragraphs
+        const paragraphs = newText.split(/\n\s*\n/).filter(p => p.trim().length > 0);
+        
+        if (paragraphs.length > 1) {
+          // Found multiple paragraphs - send each separately
+          console.log(`🔍 Found ${paragraphs.length} paragraphs to process separately`);
+          for (const paragraph of paragraphs) {
+            const baseId = this.generateResponseId(this.currentResponseElement);
+            const responseId = `${baseId}-para-${this.chunkCounterForElement++}`;
+            console.log(`📤 Sending separate paragraph: "${paragraph.substring(0, 40)}..." (Len: ${paragraph.length})`);
+            await this.sendStreamChunk(paragraph.trim(), false, responseId);
+            this.processedChunks.set(this.simpleHash(paragraph), true);
+          }
+          // Update tracking
+          this.currentResponseText = textToProcess;
+          this.lastProcessedText = textToProcess;
+        } else if (isAtCodeBlockBoundary || this.findCompleteParagraph(newText).found) {
+          // Continue with existing boundary logic
+          const baseId = this.generateResponseId(this.currentResponseElement);
+          const responseId = `${baseId}-block-${this.chunkCounterForElement++}`;
+          
+          // Check if we've already sent this exact text
+          const textFingerprint = this.simpleHash(newText);
+          if (this.processedChunks.has(textFingerprint)) {
+            console.log(`🔄 Skipping duplicate text: "${newText.substring(0, 40)}..."`);
+          } else {
+            console.log(`📤 Sending text at code block boundary: "${newText.substring(0, 40)}..." (Len: ${newText.length})`);
+            await this.sendStreamChunk(newText, false, responseId);
+            this.processedChunks.set(textFingerprint, true);
+            
+            // Update our current text (full replacement)
+            this.currentResponseText = textToProcess;
+            
+            // Update the processed text record
+            this.lastProcessedText = textToProcess;
+          }
+        }
+        // If not at boundary and still streaming, wait for more content
+      } else {
+        // Not streaming, send all new text
+        const baseId = this.generateResponseId(this.currentResponseElement);
+        const responseId = `${baseId}-final-${this.chunkCounterForElement++}`;
+        
+        // Check if we've already sent this exact text
+        const textFingerprint = this.simpleHash(newText);
+        if (this.processedChunks.has(textFingerprint)) {
+          console.log(`🔄 Skipping duplicate text: "${newText.substring(0, 40)}..."`);
+        } else {
+          console.log(`📤 Sending final text: "${newText.substring(0, 40)}..." (Len: ${newText.length})`);
+          await this.sendStreamChunk(newText, true, responseId);
+          this.processedChunks.set(textFingerprint, true);
+          
+          // Update our current text
+          this.currentResponseText = textToProcess;
+          
+          // Update the processed text record
+          this.lastProcessedText = textToProcess;
+        }
+      }
+    }
+
+    if (!isStreaming) {
+      console.log(`✅ Fully processed response element.`);
+    }
   } catch (error) {
     console.error("❌ Process error in processStreamUpdate:", error);
   } finally {
     this.processingLock = false;
   }
 }
-
-  findNextBoundary(text, startPosition) {
-    const textToCheck = text.substring(startPosition);
-    const boundaries = [
-      { name: 'code_block_start', pattern: /```/,
-        handler: (match, fullText, absMatchStart) => {
-          const closingMatch = /```/.exec(fullText.substring(absMatchStart + 3));
-          if (closingMatch) return { position: absMatchStart, endPosition: absMatchStart + 3 + closingMatch.index + 3, type: 'code_block' };
-          return { position: absMatchStart, endPosition: fullText.length, type: 'code_block_unclosed' }; 
-        }},
-      { name: 'artifact_start_func_calls', pattern: /<function_calls>/i,
-        handler: (match, fullText, absMatchStart) => {
-          const closingMatch = /<\/function_calls>/i.exec(fullText.substring(absMatchStart + match[0].length));
-          if (closingMatch) return { position: absMatchStart, endPosition: absMatchStart + match[0].length + closingMatch.index + closingMatch[0].length, type: 'artifact_function_calls' };
-          return { position: absMatchStart, endPosition: fullText.length, type: 'artifact_function_calls_unclosed' };
-        }},
-      { name: 'artifact_block_generic', pattern: /\[artifact[^\]]*\]/i, 
-        handler: (match, fullText, absMatchStart) => {
-          return { position: absMatchStart, endPosition: absMatchStart + match[0].length, type: 'artifact_block' };
-        }}
-    ];
-    
-    let nearestBoundary = { found: false, position: Infinity, endPosition: Infinity, type: '' };
-    
-    for (const boundaryDef of boundaries) {
-      const match = boundaryDef.pattern.exec(textToCheck);
-      if (match) {
-        const absolutePosition = startPosition + match.index;
-        if (absolutePosition < nearestBoundary.position) {
-          const boundaryDetails = boundaryDef.handler(match, text, absolutePosition);
-          nearestBoundary = { found: true, ...boundaryDetails };
-        }
-      }
-    }
-    
-    if (nearestBoundary.found) {
-      return nearestBoundary;
-    }
-    return { found: false };
+	
+// Add this helper function to check for text similarity
+calculateSimilarity(str1, str2) {
+  if (!str1 || !str2) return 0;
+  if (str1 === str2) return 1.0;
+  
+  // Simple similarity check - what percentage of str1 is contained in str2
+  let matchCount = 0;
+  const words1 = str1.split(/\s+/);
+  const words2 = str2.split(/\s+/);
+  
+  for (const word of words1) {
+    if (words2.includes(word)) matchCount++;
   }
+  
+  return matchCount / words1.length;
+}
 
-  findCompleteSentence(text) {
+ findCompleteSentence(text) {
     const match = text.match(/^.*?[.!?]\s*/);
     if (match && match[0].trim().length > 10) { 
       return { found: true, text: match[0].trim(), endPosition: match[0].length };
@@ -844,13 +1212,20 @@ class TTSControlPanel {
   
   detectAndDisplay() {
     const response = this.monitor.findClaudeResponse();
+    
     if (!response) {
-      this.updatePreview('❌ No Claude response found'); this.updateStatus('No response detected'); return;
+      this.updatePreview('❌ No Claude response found'); 
+      this.updateStatus('No response detected'); 
+      return;
     }
+    
     const text = this.monitor.extractText(response);
     if (!text) {
-      this.updatePreview('❌ Failed to extract valid text'); this.updateStatus('Text extraction failed'); return;
+      this.updatePreview('❌ Failed to extract valid text'); 
+      this.updateStatus('Text extraction failed'); 
+      return;
     }
+    
     this.updatePreview(text); 
     this.updateStatus(`Detected ${text.length} characters`);
   }
