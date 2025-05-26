@@ -1,41 +1,6 @@
-// Smart Streaming Content Script for Claude - Version 3.5 - Enhanced with Config Integration
-console.log("🚀 Smart Streaming Claude TTS loaded - Version 3.5 (Config Integrated)");
-
-// Load configuration from extension config
-const CONFIG = window.CLAUDE_TTS_CONFIG || {
-  server: { 
-    host: "127.0.0.1", 
-    port: 5000,
-    endpoints: {
-      stream: "/stream",
-      tts: "/tts",
-      health: "/health", 
-      reset: "/reset_conversation"
-    }
-  },
-  streaming: { 
-    debounceMs: 250,
-    healthCheckIntervalMs: 30000,
-    retryAttempts: 3,
-    retryDelayMs: 750,
-    chunkMinLength: 5
-  },
-  ui: {
-    quiet_mode: true,
-    panelPosition: "bottom-right",
-    enablePreview: true,
-    previewMaxLength: 500
-  }
-};
-
-const QUIET_MODE = CONFIG.ui.quiet_mode;
-
-// Helper function to build server URLs
-const getServerUrl = (endpoint = '') => {
-  return `http://${CONFIG.server.host}:${CONFIG.server.port}${endpoint}`;
-};
-
-console.log("📋 Loaded config:", CONFIG);
+// Smart Streaming Content Script for Claude - Version 3.4 - Enhanced Processing Logic
+console.log("🚀 Smart Streaming Claude TTS loaded - Version 3.4 (Patched)");
+const QUIET_MODE = true;
 
 class ClaudeStreamMonitor {
   constructor() {
@@ -47,14 +12,14 @@ class ClaudeStreamMonitor {
     this.currentResponseElement = null; // The DOM element currently being observed for text
     this.conversationModeStartTime = null;
     this.processedChunks = new Map(); // Stores chunks sent for currentResponseElement to avoid resending *exact* same text block
-    this.currentResponseText = ""; // Mirrors currentResponseElement.textContent, but cleaned
-    this.lastSentLength = 0; // How much of currentResponseText has been processed (sent or skipped)
+    this.currentResponseText = ""; // Mirrors currentResponseElement.textContent, but cleaned (raw DOM text for current cycle)
+    this.lastSentLength = 0; // How much of currentResponseText has been processed (sent or skipped) - less relevant with new logic
     this.chunkCounterForElement = 0; // Sequence number for chunks of currentResponseElement
-    this.lastProcessedText = ""; // The exact textToProcess from the last successful processing run
+    this.lastProcessedText = ""; // The exact textToProcess (cleaned) from the last successful processing run for the current logical response
     this.isRetrying = false;
     this.serverHealthy = true;
     this.failedRequests = []; // Stores requests that failed due to server/network issues
-    this.lastCleanedText = ""; // The last text sent to TTS OR the full text if it was a final chunk
+    this.lastCleanedText = ""; // The accumulated *cleaned* text that has been sent to TTS for the current logical response
     this.loadSettings();
     this.resetServerOnPageLoad();
     this.startHealthCheck();
@@ -62,7 +27,7 @@ class ClaudeStreamMonitor {
 
   async startHealthCheck() {
     try {
-      const result = await fetch(getServerUrl(CONFIG.server.endpoints.health), {
+      const result = await fetch("http://127.0.0.1:5000/health", {
         method: 'GET',
       }).then(res => res.json());
 
@@ -80,7 +45,7 @@ class ClaudeStreamMonitor {
       if (this.serverHealthy) console.error("❌ TTS Server health check failed:", e);
       this.serverHealthy = false;
     }
-    setTimeout(() => this.startHealthCheck(), CONFIG.streaming.healthCheckIntervalMs);
+    setTimeout(() => this.startHealthCheck(), 30000);
   }
 
   async retryFailedRequests() {
@@ -110,10 +75,24 @@ class ClaudeStreamMonitor {
   }
 
   resetForNewResponse() {
-    console.log("🔄 Resetting for new response (explicit call)");
-    if (this.currentResponseElement && this.currentResponseText.length > this.lastSentLength) {
-      this.sendFinalChunk();
+    // This function is called when "Detect Claude Response" is clicked.
+    // It should ensure that if there was an ongoing response, its final chunk is sent,
+    // and then state is reset to cleanly process the newly detected (or re-detected) element.
+    console.log("🔄 Resetting for new response (explicit call via Detect Button)");
+    if (this.currentResponseElement) {
+        // Use the more robust finalization logic similar to switching logical responses
+        const currentElementCleanedFullText = this.lastProcessedText; // Cleaned text of the element being abandoned
+        if (currentElementCleanedFullText && currentElementCleanedFullText.length > this.lastCleanedText.length) {
+            const remainingTextToSend = currentElementCleanedFullText.substring(this.lastCleanedText.length).trim();
+            if (remainingTextToSend.length > 0) {
+                const baseId = this.generateResponseId(this.currentResponseElement);
+                const responseId = `${baseId}-final-ondetect-${this.chunkCounterForElement++}`;
+                console.log(`📤 Sending final chunk due to Detect button: "${remainingTextToSend.substring(0, 50)}..."`);
+                this.sendStreamChunk(remainingTextToSend, true, responseId);
+            }
+        }
     }
+    // Full reset of state
     this.currentResponseElement = null;
     this.currentResponseText = "";
     this.lastSentLength = 0;
@@ -124,55 +103,26 @@ class ClaudeStreamMonitor {
   }
 
   sendFinalChunk() {
-    if (this.currentResponseElement && this.currentResponseText.length > 0 &&
-      this.lastSentLength < this.currentResponseText.length) {
+    // This method is called for the outgoing 'this.currentResponseElement'
+    // before it's replaced by a new logical response's element.
+    // It ensures any remaining processed text that wasn't sent gets sent.
+    if (this.currentResponseElement && this.lastProcessedText) { // lastProcessedText is the cleaned version of currentResponseText
+        const finalCleanedFullText = this.lastProcessedText;
 
-      const remainingFullText = this.currentResponseText.substring(this.lastSentLength);
-      let textToActuallySend = "";
-      let currentInternalPos = 0;
-
-      while (currentInternalPos < remainingFullText.length) {
-        const absolutePosInCurrentText = this.lastSentLength + currentInternalPos;
-        const boundary = this.findNextBoundary(this.currentResponseText, absolutePosInCurrentText);
-
-        let segmentBeforeBoundary;
-        if (boundary.found && boundary.position === absolutePosInCurrentText) {
-          currentInternalPos += (boundary.endPosition - absolutePosInCurrentText);
-          continue;
+        if (finalCleanedFullText.length > this.lastCleanedText.length) {
+            const remainingTextToSend = finalCleanedFullText.substring(this.lastCleanedText.length).trim();
+            if (remainingTextToSend.length > 0) {
+                const baseId = this.generateResponseId(this.currentResponseElement);
+                // Use a distinct suffix for chunks sent by this specific mechanism
+                const responseId = `${baseId}-prevfinal-${this.chunkCounterForElement++}`;
+                console.log(`📤 Sending final chunk for previous response (via sendFinalChunk): "${remainingTextToSend.substring(0, 50)}..." (${remainingTextToSend.length} chars)`);
+                this.sendStreamChunk(remainingTextToSend, true, responseId);
+                // this.lastCleanedText will be reset by the calling function after this for the new logical response
+            }
         }
-
-        if (boundary.found) {
-          segmentBeforeBoundary = this.currentResponseText.substring(absolutePosInCurrentText, boundary.position);
-        } else {
-          segmentBeforeBoundary = this.currentResponseText.substring(absolutePosInCurrentText);
-        }
-
-        if (segmentBeforeBoundary.trim().length > 0) {
-          textToActuallySend += segmentBeforeBoundary.trim() + " ";
-        }
-        currentInternalPos += segmentBeforeBoundary.length;
-
-        if (segmentBeforeBoundary.length === 0 && currentInternalPos < remainingFullText.length) {
-          if (/\s/.test(remainingFullText[currentInternalPos])) {
-            currentInternalPos++;
-          } else {
-            console.warn("sendFinalChunk got stuck processing remaining text. Breaking.");
-            break;
-          }
-        }
-      }
-
-      textToActuallySend = textToActuallySend.trim();
-      if (textToActuallySend.length > 0) {
-        const baseId = this.generateResponseId(this.currentResponseElement);
-        const responseId = `${baseId}-final-${this.chunkCounterForElement++}`;
-        console.log(`📤 Sending final chunk (via sendFinalChunk): ${textToActuallySend.substring(0, 50)}... (${textToActuallySend.length} chars)`);
-        this.sendStreamChunk(textToActuallySend, true, responseId);
-        this.lastSentLength = this.currentResponseText.length;
-        this.lastCleanedText = this.currentResponseText; // Update lastCleanedText with the full text
-      }
     }
   }
+
 
   findClaudeResponse() {
     const streamingElements = document.querySelectorAll('[data-is-streaming]');
@@ -203,7 +153,7 @@ class ClaudeStreamMonitor {
   async resetServerOnPageLoad() {
     setTimeout(async () => {
       try {
-        const result = await this.sendToServer(CONFIG.server.endpoints.reset, {
+        const result = await this.sendToServer("/reset_conversation", {
           client_ip: 'browser',
           response_id: 'page-refresh-' + Date.now()
         });
@@ -294,7 +244,7 @@ class ClaudeStreamMonitor {
     clearTimeout(this.debounceTimer);
     this.debounceTimer = setTimeout(() => {
       this.processStreamUpdate();
-    }, CONFIG.streaming.debounceMs);
+    }, 250);
   }
 
   findCompleteParagraph(text) {
@@ -467,12 +417,12 @@ class ClaudeStreamMonitor {
     const sentences = this.findAllSentences(text);
 
     if (sentences.length === 1 && sentences[0].length > 100) {
-      console.log("🎤 Pure text rule: Single long sentence detected.");
+      // console.log("🎤 Pure text rule: Single long sentence detected.");
       return true;
     }
 
     if (sentences.length >= 2) {
-      console.log("🎤 Pure text rule: Two or more sentences detected.");
+      // console.log("🎤 Pure text rule: Two or more sentences detected.");
       return true;
     }
     return false;
@@ -509,6 +459,7 @@ class ClaudeStreamMonitor {
     return sentences;
   }
 
+
   findCompleteSentence(text) {
     const sentences = this.findAllSentences(text);
     if (sentences.length > 0 && sentences[0].length > 10) {
@@ -524,206 +475,257 @@ class ClaudeStreamMonitor {
     return sentences.length >= 2;
   }
 
-  // Fix the core issue: response element detection during streaming
-    async processStreamUpdate() {
-      if (!this.conversationMode) {
-        if (this.processingLock) this.processingLock = false;
+  getResponseBaseId(element) {
+    if (!element) return null;
+    
+    const assistantMessageElement = element.closest('[data-message-author-role="assistant"]') || element;
+    const allResponses = document.querySelectorAll('[data-message-author-role="assistant"]');
+    const position = Array.from(allResponses).indexOf(assistantMessageElement);
+    
+    // Return the stable position-based ID
+    return `resp-${position}`;
+  }
+
+
+  async processStreamUpdate() {
+    if (!this.conversationMode) {
+      if (this.processingLock) this.processingLock = false;
+      return;
+    }
+
+    if (this.processingLock) return;
+    this.processingLock = true;
+
+    try {
+      const newResponseDomElement = this.findClaudeResponse();
+      if (!newResponseDomElement) {
+        this.processingLock = false;
         return;
       }
 
-      if (this.processingLock) return;
-      this.processingLock = true;
+      const newElementBaseId = this.getResponseBaseId(newResponseDomElement);
+      const previousElementBaseId = this.currentResponseElement ? this.getResponseBaseId(this.currentResponseElement) : null;
 
-      try {
-        const responseElement = this.findClaudeResponse();
-        if (!responseElement) {
-          this.processingLock = false;
-          return;
+      if (newElementBaseId !== previousElementBaseId) {
+        console.log(`🔄 NEW LOGICAL RESPONSE DETECTED (Prev base: ${previousElementBaseId || 'N/A'}, New base: ${newElementBaseId})`);
+        if (this.currentResponseElement) {
+          console.log("✅ Sending final chunk for previous logical response before switching.");
+          this.sendFinalChunk(); // Operates on old this.currentResponseElement's state
         }
+        // Full reset for a genuinely new logical response
+        this.currentResponseElement = newResponseDomElement;
+        this.currentResponseText = "";    // Will be updated from newResponseDomElement.textContent
+        this.lastSentLength = 0;          // Reset (though less critical with new logic)
+        this.chunkCounterForElement = 0;
+        this.processedChunks.clear();
+        this.lastProcessedText = "";      // Reset: no processed text for this new logical response yet
+        this.lastCleanedText = "";        // CRITICAL: Reset for new logical response
+        console.log("🔄 Switched to new logical response element. State fully reset.");
+      } else if (newResponseDomElement !== this.currentResponseElement) {
+        // DOM element changed, but it's part of the same logical response (base ID is the same).
+        console.log(`🔄 DOM element reference updated for current logical response (Base ID: ${newElementBaseId}). Preserving context.`);
+        this.currentResponseElement = newResponseDomElement;
+        // DO NOT reset lastCleanedText, lastProcessedText, chunkCounterForElement, processedChunks.
+        // currentResponseText will be updated with the new DOM element's content below.
+      }
 
-        const currentId = this.generateResponseId(responseElement);
+      const currentFullTextFromDOM = this.currentResponseElement.textContent || "";
 
-        // CRITICAL FIX: Don't reset state for same logical response
-        if (responseElement !== this.currentResponseElement) {
-          const prevId = this.currentResponseElement ?
-            this.generateResponseId(this.currentResponseElement) : null;
+      if (currentFullTextFromDOM === this.currentResponseText && this.lastProcessedText === this.currentResponseText) {
+        // console.log("🚫 DOM content unchanged from last cycle and already processed.");
+        this.processingLock = false;
+        return;
+      }
+      
+      this.currentResponseText = currentFullTextFromDOM; // Update to latest raw DOM text for this cycle.
+      
+      // console.log(`📝 Processing response element: ${this.generateResponseId(this.currentResponseElement)}`);
+      // console.log("DEBUG - this.currentResponseText (raw from DOM for this cycle):", this.currentResponseText?.substring(0,50));
+      // console.log("DEBUG - lastCleanedText (accumulated for this logical response):", this.lastCleanedText?.substring(0, 50));
+      // console.log("DEBUG - lastProcessedText (cleaned full text from PREVIOUS cycle):", this.lastProcessedText?.substring(0, 50));
 
-          // Only reset if this is truly a NEW response (different base ID)
-          const currentBaseId = currentId.substring(0, currentId.lastIndexOf('-'));
-          const prevBaseId = prevId ? prevId.substring(0, prevId.lastIndexOf('-')) : null;
 
-          if (prevBaseId && currentBaseId === prevBaseId) {
-            console.log(`🔄 DOM element updated but same logical response (${currentId})`);
-            this.currentResponseElement = responseElement; // Update element reference
-            // DON'T reset state - continue with current context
-          } else {
-            console.log("🔄 NEW LOGICAL RESPONSE DETECTED");
-            if (this.currentResponseElement) {
-              console.log("✅ Sending final chunk for previous response element");
-              this.sendFinalChunk();
-            }
-            // Reset for truly new response
-            this.currentResponseElement = responseElement;
-            this.currentResponseText = "";
-            this.lastSentLength = 0;
-            this.chunkCounterForElement = 0;
-            this.processedChunks.clear();
-            this.lastProcessedText = "";
-            this.lastCleanedText = "";
-            console.log("🔄 Switched to new response element. State reset for new element.");
-          }
+      const codeBlocksAndArtifacts = [];
+      const hasCodeBlockInText = /```/.test(this.currentResponseText);
+      const preElements = this.currentResponseElement.querySelectorAll('pre');
+      for (const preEl of preElements) {
+        codeBlocksAndArtifacts.push({ element: preEl, text: preEl.textContent, type: 'code_block' });
+      }
+      // ... (artifactSelectors and loop remain the same)
+      const artifactSelectors = [
+        '.artifact-block-cell', '[data-artifact-title]', 'button.flex.text-left.font-styrene',
+        '[aria-label="Preview contents"]', 'div[class*="transition-all duration"]', 'div.font-tiempos'
+      ];
+      for (const selector of artifactSelectors) {
+        const artifactElements = this.currentResponseElement.querySelectorAll(selector);
+        for (const artifactEl of artifactElements) {
+          codeBlocksAndArtifacts.push({ element: artifactEl, text: artifactEl.textContent, type: 'artifact' });
         }
+      }
 
-        const currentFullText = responseElement.textContent || "";
-        console.log(`📝 Processing response element: ${currentId}`);
-
-        // FIXED: Better artifact detection using Claude's actual selectors
-        const codeBlocksAndArtifacts = [];
-        const hasCodeBlockInText = /```/.test(currentFullText);
-
-        // Check for Claude's actual artifact containers
-        const preElements = responseElement.querySelectorAll('pre');
-        const codeBlockElements = responseElement.querySelectorAll('.code-block__code');
-        const languageCodeElements = responseElement.querySelectorAll('code[class*="language-"]');
-
-        // Collect all artifact elements
-        for (const preEl of preElements) {
-          codeBlocksAndArtifacts.push({
-            element: preEl,
-            text: preEl.textContent,
-            type: 'pre_block'
-          });
+      let textToProcess = this.currentResponseText;
+      for (const item of codeBlocksAndArtifacts) {
+        const itemText = item.text;
+        if (itemText && textToProcess.includes(itemText)) {
+          textToProcess = textToProcess.replace(itemText, "\n\n");
         }
+      }
+      textToProcess = textToProcess.replace(/\n\s*\n/g, '§PARAGRAPH§')
+        .replace(/\s+/g, ' ')
+        .replace(/§PARAGRAPH§/g, '\n\n')
+        .trim();
+      textToProcess = textToProcess.replace(/(Analyzing|Thinking|Parsing|Considering|Evaluating|Pondering)[^.]*\./gi, '').trim();
+      textToProcess = textToProcess.replace(/You're absolutely right/g, "You're right");
+      textToProcess = textToProcess.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '').trim();
+      
+      // console.log("DEBUG - textToProcess (cleaned current full DOM):", textToProcess.substring(0, 50));
 
-        for (const codeEl of codeBlockElements) {
-          codeBlocksAndArtifacts.push({
-            element: codeEl,
-            text: codeEl.textContent,
-            type: 'code_block'
-          });
-        }
+      if (textToProcess.length === 0) {
+        console.log("🚫 No text content after removing code blocks and cleaning.");
+        this.lastProcessedText = textToProcess; 
+        this.processingLock = false;
+        return;
+      }
 
-        for (const langEl of languageCodeElements) {
-          codeBlocksAndArtifacts.push({
-            element: langEl,
-            text: langEl.textContent,
-            type: 'language_code'
-          });
-        }
+      if (textToProcess === this.lastProcessedText) {
+        // console.log("🚫 Current cleaned DOM is identical to last fully processed cleaned text - skipping.");
+        this.processingLock = false;
+        return;
+      }
 
-        const isAtCodeBlockBoundary = codeBlocksAndArtifacts.length > 0 || hasCodeBlockInText;
-        console.log("🔍 isAtCodeBlockBoundary:", isAtCodeBlockBoundary);
-        if (codeBlocksAndArtifacts.length > 0) {
-          console.log(`🎯 Found ${codeBlocksAndArtifacts.length} artifact elements`);
-        }
-
-        // FIXED: Properly clean content by removing all artifact text
-        let textToProcess = currentFullText;
-        for (const item of codeBlocksAndArtifacts) {
-          const itemText = item.text;
-          if (itemText && textToProcess.includes(itemText)) {
-            textToProcess = textToProcess.replace(itemText, " ");
-            console.log(`🗑️ Removed ${item.type}: ${itemText.substring(0, 50)}...`);
-          }
-        }
-
-        // Additional cleanup for any remaining code blocks in text
-        textToProcess = textToProcess.replace(/```[\s\S]*?```/g, " ");
-
-        // Clean up whitespace (keep your existing normalization)
-        textToProcess = textToProcess.replace(/\n\s*\n/g, '§PARAGRAPH§')
-          .replace(/\s+/g, ' ')
-          .replace(/§PARAGRAPH§/g, '\n\n')
-          .trim();
-
-        console.log(`🧹 Content cleaned: ${currentFullText.length} → ${textToProcess.length} chars`);
-        console.log(`📤 Clean text: "${textToProcess.substring(0, 100)}..."`);
-
-        // Continue with your existing logic...
-        if (textToProcess === this.lastProcessedText) {
-          console.log("🚫 Already processed this exact cleaned text - skipping");
-          this.currentResponseText = currentFullText;
-          this.processingLock = false;
-          return;
-        }
-
-        let newText = "";
-        if (this.lastCleanedText && textToProcess.startsWith(this.lastCleanedText)) {
+      let newText = "";
+      if (this.lastCleanedText && textToProcess.startsWith(this.lastCleanedText)) {
           newText = textToProcess.substring(this.lastCleanedText.length).trim();
-          console.log(`🔍 Text extended. New part: "${newText.substring(0, 40)}..."`);
-        } else {
+          // if (newText.length > 0) console.log(`🔍 Text extended. New part: "${newText.substring(0, 40)}..."`);
+      } else {
           newText = textToProcess;
-          this.lastCleanedText = "";
-          console.log(`🆕 Text is new or significantly changed. Processing as new: "${newText.substring(0, 40)}..."`);
+          if (this.lastCleanedText) {
+              console.log(`🆕 Text diverged or is new relative to lastCleanedText. Full new content: "${newText.substring(0,40)}..." (Old lastCleanedText: "${this.lastCleanedText.substring(0,40)}...")`);
+              this.lastCleanedText = ""; // Reset accumulation because continuity is broken for this logical response.
+          } else {
+              // console.log(`🆕 Text is new (no prior lastCleanedText for this logical response). Processing as new: "${newText.substring(0,40)}..."`);
+          }
+      }
+      
+      if (newText.length === 0 && textToProcess !== this.lastCleanedText /* ensure some change happened */) {
+          // This can happen if textToProcess has changed (e.g. shortened) but new part is empty
+          // console.log("🚫 No new text to send after comparison, but underlying text may have changed. lastCleanedText may need update if textToProcess is now shorter.");
+          if (textToProcess.length < this.lastCleanedText.length && this.lastCleanedText.startsWith(textToProcess)) {
+            // console.log("📝 Text shortened. Updating lastCleanedText.");
+            // this.lastCleanedText = textToProcess; // This might be too aggressive, could truncate valid spoken text.
+            // For now, we primarily handle appends. Shortening/replacement is complex for TTS continuity.
+          }
+      }
+       if (newText.length === 0) {
+            // console.log("🚫 No new text to send after comparison with lastCleanedText.");
+            this.lastProcessedText = textToProcess;
+            this.processingLock = false;
+            return;
         }
 
-        if (newText.length === 0) {
-          console.log("🚫 No new text to send after comparison.");
-          this.lastProcessedText = textToProcess;
-          this.currentResponseText = currentFullText;
-          this.processingLock = false;
-          return;
-        }
 
-        const isStreaming = this.isClaudeTyping(responseElement);
-        console.log("🤔 Sending decision - Block boundary:", isAtCodeBlockBoundary, "Text length:", newText.length, "Is Streaming:", isStreaming);
+      const isStreaming = this.isClaudeTyping(this.currentResponseElement);
+      const isAtCodeBlockBoundary = codeBlocksAndArtifacts.length > 0 || hasCodeBlockInText; // Based on full current text
+      // console.log("🤔 Sending decision - Block boundary:", isAtCodeBlockBoundary, "Text length:", newText.length, "Is Streaming:", isStreaming);
 
-        if (newText.length > 0) {
-          let textToSend = "";
-          let sendComplete = !isStreaming;
+      if (newText.length > 0) {
+        let textToSend = "";
+        let sendComplete = !isStreaming; 
+        let paragraphBreakMatch = null; 
 
-          if (isStreaming) {
-            if (isAtCodeBlockBoundary && newText.trim().length > 0) {
+        if (isStreaming) {
+          paragraphBreakMatch = newText.match(/^(.+?\n\n)/); 
+          const shouldSendPure = this.shouldSendPureText(newText);
+
+          if (isAtCodeBlockBoundary && newText.trim().length > 0 && this.lastCleanedText.length === 0) { // Send initial part if it starts near boundary
+            textToSend = newText.trim(); 
+            sendComplete = false; 
+            console.log("🎤 Sending initial part due to code block boundary.");
+          } else if (paragraphBreakMatch) {
+            const paragraphText = paragraphBreakMatch[1].trim();
+            if (paragraphText.length > 20) { 
+              textToSend = paragraphText;
+              sendComplete = false;
+              console.log("🎤 Sending paragraph chunk.");
+            }
+          } else if (shouldSendPure) {
+            const sentences = this.findAllSentences(newText);
+            if (sentences.length === 1 && sentences[0].length > 100) textToSend = sentences[0];
+            else if (sentences.length >=2) textToSend = sentences[0] + " " + sentences[1]; 
+            // else textToSend = newText; // Avoid sending very small fragments if not meeting sentence criteria
+
+            if (textToSend.length > 0) {
+                sendComplete = false; 
+                console.log("🎤 Sending based on pure text rules (sentence detection).");
+            }
+          } else if (newText.length > 300) { 
+            const sentenceMatch = this.findCompleteSentence(newText);
+            if (sentenceMatch.found && sentenceMatch.text.length > 50) {
+              textToSend = sentenceMatch.text;
+              sendComplete = false;
+              console.log("🎤 Sending long text sentence chunk.");
+            }
+          }
+          // If still streaming and no rule hit, but newText is substantial, consider sending it.
+          else if (newText.trim().length > 150 && !sendComplete) { // Heuristic for "substantial"
               textToSend = newText.trim();
               sendComplete = false;
-              console.log("🎤 Sending due to code block boundary.");
-            } else if (this.shouldSendPureText(newText)) {
-              const sentences = this.findAllSentences(newText);
-              if (sentences.length >= 2) textToSend = sentences[0] + " " + sentences[1];
-              else textToSend = newText;
-              sendComplete = false;
-              console.log("🎤 Sending based on pure text rules (sentence detection).");
-            }
-          } else {
-            textToSend = newText.trim();
-            sendComplete = true;
-            console.log("🎤 Sending final chunk as Claude is not typing.");
+              console.log("🎤 Sending substantial new text chunk (no specific boundary).");
           }
 
-          if (textToSend.length > 0) {
-            const baseId = this.generateResponseId(this.currentResponseElement);
-            const chunkType = sendComplete ? "final" : (isAtCodeBlockBoundary ? "block" : "sent");
-            const responseId = `${baseId}-${chunkType}-${this.chunkCounterForElement++}`;
 
-            await this.sendStreamChunk(textToSend, sendComplete, responseId);
-            console.log("✅ Successfully sent chunk, updating state");
-
-            this.lastCleanedText = textToProcess;
-            this.processedChunks.set(this.simpleHash(textToSend), true);
-          }
+        } else { // Not streaming
+          textToSend = newText.trim(); // Send all remaining new text
+          sendComplete = true;
+          console.log("🎤 Sending final chunk as Claude is not typing (or full message if never streamed).");
         }
 
-        this.currentResponseText = currentFullText;
-        this.lastProcessedText = textToProcess;
+        if (textToSend.length > 0) {
+          const baseIdForChunk = this.generateResponseId(this.currentResponseElement);
+          const chunkType = sendComplete ? "final" : (isAtCodeBlockBoundary && this.lastCleanedText.length === 0 ? "block" : (paragraphBreakMatch ? "para" : "sent"));
+          const responseId = `${baseIdForChunk}-${chunkType}-${this.chunkCounterForElement++}`;
+          
+          await this.sendStreamChunk(textToSend, sendComplete, responseId);
+          // console.log(`✅ Successfully sent chunk "${textToSend.substring(0,30)}...", updating state.`);
 
-      } catch (error) {
-        console.error("❌ Process error in processStreamUpdate:", error);
-      } finally {
-        this.processingLock = false;
+          // Append successfully sent text to lastCleanedText
+          const separator = (this.lastCleanedText.length > 0 && !this.lastCleanedText.endsWith(' ') && !textToSend.startsWith(' ')) ? " " : "";
+          this.lastCleanedText += separator + textToSend;
+          this.processedChunks.set(this.simpleHash(textToSend), true);
+        }
       }
-    }
+      
+      this.lastProcessedText = textToProcess; // Record that this version of cleaned DOM text has been handled.
 
-    generateResponseId(element) {
-      if (!element) return `unknown-${Date.now()}`;
-      
-      const allResponses = document.querySelectorAll('[data-message-author-role="assistant"]');
-      const position = Array.from(allResponses).indexOf(element.closest('[data-message-author-role="assistant"]') || element);
-      const contentHash = this.simpleHash((element.textContent || "").substring(0, 100));
-      
-      const baseId = `resp-${position}-${contentHash}`;
-      return baseId;
+      if (!isStreaming && textToProcess !== this.lastCleanedText) {
+        const remainingUnsentCleanedText = textToProcess.substring(this.lastCleanedText.length).trim();
+        if (remainingUnsentCleanedText.length > 0) {
+            console.log(`🤔 Streaming stopped. Sending final remaining unsent cleaned text: "${remainingUnsentCleanedText.substring(0,50)}..."`);
+            const baseIdForChunk = this.generateResponseId(this.currentResponseElement);
+            const responseId = `${baseIdForChunk}-final-rem-${this.chunkCounterForElement++}`;
+            await this.sendStreamChunk(remainingUnsentCleanedText, true, responseId);
+            const separator = (this.lastCleanedText.length > 0 && !this.lastCleanedText.endsWith(' ') && !remainingUnsentCleanedText.startsWith(' ')) ? " " : "";
+            this.lastCleanedText += separator + remainingUnsentCleanedText;
+            this.lastProcessedText = textToProcess; 
+        }
+      }
+      if (!isStreaming) { // Final check when streaming stops
+          this.lastProcessedText = textToProcess; // Ensure it's updated
+          if (this.lastCleanedText !== textToProcess) {
+              // This might happen if textToProcess contains parts that are intentionally not spoken (e.g. complex artifacts not fully stripped).
+              // console.warn("⚠️ Post-streaming: lastCleanedText and final textToProcess differ. This may be normal if some content is unutterable.",
+              //   `\nLastCleaned: "${this.lastCleanedText.slice(-100)}"`,
+              //   `\nTextToProcess: "${textToProcess.slice(-100)}"`);
+          }
+      }
+
+    } catch (error) {
+      console.error("❌ Process error in processStreamUpdate:", error, error.stack);
+    } finally {
+      this.processingLock = false;
     }
-    
+  }
+
   calculateSimilarity(str1, str2) {
     if (!str1 || !str2) return 0;
     if (str1 === str2) return 1.0;
@@ -744,7 +746,7 @@ class ClaudeStreamMonitor {
     return (element && typeof element.textContent === 'string') ? element.textContent.trim() : null;
   }
 
-  getResponseTimestamp(element) { // This function might be less relevant with the new ID but kept for now
+  getResponseTimestamp(element) { 
     if (!element) return Date.now();
     const allResponses = document.querySelectorAll('[data-message-author-role="assistant"]');
     const index = Array.from(allResponses).indexOf(element);
@@ -752,36 +754,39 @@ class ClaudeStreamMonitor {
   }
 
   isClaudeTyping(responseElement) {
-      if (!responseElement) return false;
-      
-      // Check explicit streaming attributes first
-      if (responseElement.getAttribute('data-is-streaming') === 'true') return true;
-      if (responseElement.closest('[data-is-streaming="true"]')) return true;
-      
-      // CRITICAL FIX: Force streaming mode when code blocks are detected
-      // This ensures code blocks behave like artifacts with real-time streaming
-      const hasCodeBlocks = responseElement.querySelector('pre') || /```/.test(responseElement.textContent);
-      if (hasCodeBlocks) {
-        console.log("🔧 Code block detected - forcing streaming mode for boundary detection");
-        return true;  // Force streaming mode for code blocks
-      }
+    if (!responseElement) return false;
+    if (responseElement.getAttribute('data-is-streaming') === 'true') return true;
+    if (responseElement.closest('[data-is-streaming="true"]')) return true;
 
-      // Check for typing indicators
-      const typingSelectors = [
-        '.typing-indicator', '.claude-typing-indicator', '.animate-pulse',
-        '[class*="cursor"]', '.blinking-cursor', '[class*="streaming"]', '[class*="generating"]'
-      ];
+    const typingSelectors = [
+      '.typing-indicator', '.claude-typing-indicator', '.animate-pulse',
+      '[class*="cursor"]', '.blinking-cursor', '[class*="streaming"]', '[class*="generating"]'
+    ];
 
-      for (const selector of typingSelectors) {
-        if (responseElement.querySelector(selector) || responseElement.closest(selector)) return true;
-      }
-
-      // Check if send button is disabled (Claude is typing)
-      const sendButton = document.querySelector('button[type="submit"]:disabled, button[aria-label*="Send"]:disabled, button[aria-label*="send"]:disabled');
-      if (sendButton) return true;
-
-      return false;
+    for (const selector of typingSelectors) {
+      if (responseElement.querySelector(selector) || responseElement.closest(selector)) return true;
     }
+
+    const sendButton = document.querySelector('button[type="submit"]:disabled, button[aria-label*="Send"]:disabled, button[aria-label*="send"]:disabled');
+    if (sendButton) return true;
+
+    return false;
+  }
+
+  generateResponseId(element) {
+    if (!element) return `unknown-${Date.now()}`;
+    
+    const assistantMessageElement = element.closest('[data-message-author-role="assistant"]') || element;
+    const allResponses = document.querySelectorAll('[data-message-author-role="assistant"]');
+    const position = Array.from(allResponses).indexOf(assistantMessageElement);
+    
+    // Use a more stable hash, e.g., from the first few words or a fixed part of the element if available
+    // For now, keep existing hash method but its volatility is less critical if base ID (pos) is primary grouping key.
+    const contentHash = this.simpleHash((element.textContent || "").substring(0, 100)); 
+    
+    const baseId = `resp-${position}-${contentHash}`;
+    return baseId;
+  }
 
   simpleHash(str) { 
     if (!str) return '0'; 
@@ -799,7 +804,7 @@ class ClaudeStreamMonitor {
       return { success: true, error: "Empty text, skipped" };
     }
 
-    const MAX_RETRIES = CONFIG.streaming.retryAttempts;
+    const MAX_RETRIES = 3;
     if (retryAttempt > MAX_RETRIES) {
       console.error(`❌ Giving up after ${retryAttempt} retries for ${responseId}. Adding to failed queue.`);
       if (!isRetryOfFailed) {
@@ -814,12 +819,12 @@ class ClaudeStreamMonitor {
     };
 
     try {
-      const result = await this.sendToServer(CONFIG.server.endpoints.stream, payload);
+      const result = await this.sendToServer("/stream", payload);
       if (result.success) {
         return result;
       } else {
         console.warn(`⚠️ Server returned error for ${responseId} (Attempt ${retryAttempt}): ${result.error}. Retrying...`);
-        await new Promise(resolve => setTimeout(resolve, (retryAttempt + 1) * CONFIG.streaming.retryDelayMs));
+        await new Promise(resolve => setTimeout(resolve, (retryAttempt + 1) * 750));
         return this.sendStreamChunk(text, isComplete, responseId, retryAttempt + 1, isRetryOfFailed);
       }
     } catch (error) {
@@ -840,9 +845,9 @@ class ClaudeStreamMonitor {
   }
 
   async sendToServer(endpoint, data) {
-    if (!this.serverHealthy && endpoint !== CONFIG.server.endpoints.health && endpoint !== CONFIG.server.endpoints.reset) {
+    if (!this.serverHealthy && endpoint !== "/health" && endpoint !== "/reset_conversation") {
       console.warn(`⚠️ Server appears to be down, not sending to ${endpoint}. Queuing if applicable.`);
-      if (endpoint === CONFIG.server.endpoints.stream && data && data.response_id && !this.failedRequests.find(fr => fr.responseId === data.response_id)) {
+      if (endpoint === "/stream" && data && data.response_id && !this.failedRequests.find(fr => fr.responseId === data.response_id)) {
         this.failedRequests.push({
           text: data.text,
           isComplete: data.is_complete,
@@ -858,7 +863,7 @@ class ClaudeStreamMonitor {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 8000);
 
-      const response = await fetch(getServerUrl(endpoint), {
+      const response = await fetch(`http://127.0.0.1:5000${endpoint}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', },
         body: JSON.stringify(data), signal: controller.signal
       });
@@ -902,9 +907,10 @@ class ClaudeStreamMonitor {
       this.failedRequests.push({ ...payload });
       return { success: false, error: "Server down, request queued" };
     }
-    return this.sendToServer(CONFIG.server.endpoints.tts, payload);
+    return this.sendToServer("/tts", payload);
   }
 }
+
 
 class TTSControlPanel {
   constructor(monitor) {
@@ -919,11 +925,8 @@ class TTSControlPanel {
 
     const panel = document.createElement('div');
     panel.id = 'claude-tts-controls';
-    
-    // Use config for panel positioning
-    const position = CONFIG.ui.panelPosition || "bottom-right";
-    const baseStyles = `
-      position: fixed; z-index: 9999;
+    panel.style.cssText = `
+      position: fixed; bottom: 20px; right: 20px; z-index: 9999;
       background-color: #1C1C1C; color: white; padding: 16px;
       border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.3);
       display: flex; flex-direction: column; gap: 12px;
@@ -931,19 +934,6 @@ class TTSControlPanel {
       font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       border: 1px solid #333;
     `;
-    
-    // Set position based on config
-    if (position === "bottom-right") {
-      panel.style.cssText = baseStyles + "bottom: 20px; right: 20px;";
-    } else if (position === "bottom-left") {
-      panel.style.cssText = baseStyles + "bottom: 20px; left: 20px;";
-    } else if (position === "top-right") {
-      panel.style.cssText = baseStyles + "top: 20px; right: 20px;";
-    } else if (position === "top-left") {
-      panel.style.cssText = baseStyles + "top: 20px; left: 20px;";
-    } else {
-      panel.style.cssText = baseStyles + "bottom: 20px; right: 20px;"; // Default fallback
-    }
 
     const title = document.createElement('div');
     title.textContent = ' Claude-to-Speech ';
@@ -989,17 +979,6 @@ class TTSControlPanel {
     serverStatus.textContent = 'Checking server status...';
     panel.appendChild(serverStatus);
 
-    // Add config info display if not in quiet mode
-    if (!CONFIG.ui.quiet_mode) {
-      const configInfo = document.createElement('div');
-      configInfo.style.cssText = `
-        font-size: 9px; color: #555; text-align: center; margin-top: 2px;
-        font-family: monospace;
-      `;
-      configInfo.textContent = `Server: ${CONFIG.server.host}:${CONFIG.server.port}`;
-      panel.appendChild(configInfo);
-    }
-
     this.addConversationModeToggle(panel);
 
     const detectBtn = document.createElement('button');
@@ -1020,34 +999,30 @@ class TTSControlPanel {
     detectBtn.onclick = () => this.detectAndDisplay();
     panel.appendChild(detectBtn);
 
-    // Only add preview area if enabled in config
-    if (CONFIG.ui.enablePreview) {
-      const previewArea = document.createElement('div');
-      previewArea.style.cssText = `
-        margin-top: 4px; border: 1px solid #D4A574; border-radius: 8px;
-        background-color: #1F2020; padding: 12px;
-      `;
+    const previewArea = document.createElement('div');
+    previewArea.style.cssText = `
+      margin-top: 4px; border: 1px solid #D4A574; border-radius: 8px;
+      background-color: #1F2020; padding: 12px;
+    `;
 
-      const previewLabel = document.createElement('div');
-      previewLabel.textContent = 'Detected Text Preview:';
-      previewLabel.style.cssText = `
-        font-size: 12px; margin-bottom: 8px; color: #D4A574; font-weight: 500;
-      `;
+    const previewLabel = document.createElement('div');
+    previewLabel.textContent = 'Detected Text Preview:';
+    previewLabel.style.cssText = `
+      font-size: 12px; margin-bottom: 8px; color: #D4A574; font-weight: 500;
+    `;
 
-      const previewText = document.createElement('div');
-      previewText.id = 'text-preview';
-      previewText.style.cssText = `
-        max-height: 120px; overflow-y: auto; font-size: 13px;
-        white-space: pre-wrap; word-break: break-word;
-        font-family: 'SF Mono', Monaco, Consolas, monospace;
-        padding: 10px; background-color: #2A2A2A; border-radius: 6px;
-        color: #F5E6D3; line-height: 1.4;
-      `;
-      previewArea.appendChild(previewLabel);
-      previewArea.appendChild(previewText);
-      panel.appendChild(previewArea);
-    }
-    
+    const previewText = document.createElement('div');
+    previewText.id = 'text-preview';
+    previewText.style.cssText = `
+      max-height: 120px; overflow-y: auto; font-size: 13px;
+      white-space: pre-wrap; word-break: break-word;
+      font-family: 'SF Mono', Monaco, Consolas, monospace;
+      padding: 10px; background-color: #2A2A2A; border-radius: 6px;
+      color: #F5E6D3; line-height: 1.4;
+    `;
+    previewArea.appendChild(previewLabel);
+    previewArea.appendChild(previewText);
+    panel.appendChild(previewArea);
     document.body.appendChild(panel);
     this.updateStatusDisplay();
   }
@@ -1055,9 +1030,8 @@ class TTSControlPanel {
   addConversationModeToggle(panel) {
     const toggleContainer = document.createElement('div');
     toggleContainer.style.cssText = `
-      display: flex; align-items: center; justify-content: space-between;
-      background-color: #2A2A2A; padding: 10px; border-radius: 8px;
-      margin-bottom: 8px;
+        display: flex; align-items: center; justify-content: space-between;
+        background-color: #2A2A2A; padding: 10px; border-radius: 8px;
     `;
 
     const label = document.createElement('label');
@@ -1066,147 +1040,87 @@ class TTSControlPanel {
 
     const toggleSwitch = document.createElement('div');
     toggleSwitch.style.cssText = `
-      width: 44px; height: 24px; background-color: #555; border-radius: 12px;
-      position: relative; cursor: pointer; transition: background-color 0.3s;
+        width: 44px; height: 24px; background-color: #555; border-radius: 12px;
+        position: relative; cursor: pointer; transition: background-color 0.3s;
     `;
-    
     const toggleKnob = document.createElement('div');
     toggleKnob.style.cssText = `
-      width: 20px; height: 20px; background-color: white; border-radius: 50%;
-      position: absolute; top: 2px; left: 2px; transition: transform 0.3s;
+        width: 20px; height: 20px; background-color: white; border-radius: 50%;
+        position: absolute; top: 2px; left: 2px; transition: transform 0.3s;
     `;
     toggleSwitch.appendChild(toggleKnob);
 
-    // Status text to show current state
-    const statusText = document.createElement('div');
-    statusText.style.cssText = `
-      font-size: 12px; color: #999; margin-top: 4px; text-align: center;
-    `;
-    
     const updateToggleVisuals = (isActive) => {
-      console.log(`🔄 Updating toggle visuals: ${isActive}`);
-      if (isActive) {
-        toggleSwitch.style.backgroundColor = '#D4A574'; 
-        toggleKnob.style.transform = 'translateX(20px)';
-        statusText.textContent = '🎤 Streaming Active';
-        statusText.style.color = '#86E0A2';
-      } else {
-        toggleSwitch.style.backgroundColor = '#555'; 
-        toggleKnob.style.transform = 'translateX(0px)';
-        statusText.textContent = '🎧 Streaming Paused';
-        statusText.style.color = '#D4A574';
-      }
+        if (isActive) {
+            toggleSwitch.style.backgroundColor = '#D4A574'; 
+            toggleKnob.style.transform = 'translateX(20px)';
+        } else {
+            toggleSwitch.style.backgroundColor = '#555'; 
+            toggleKnob.style.transform = 'translateX(0px)';
+        }
     };
     
-    // Initialize with current state
     updateToggleVisuals(this.monitor.conversationMode);
 
-    toggleSwitch.onclick = async () => {
-      try {
-        console.log(`🔄 Toggle clicked. Current state: ${this.monitor.conversationMode}`);
-        
-        // Toggle the state
+    toggleSwitch.onclick = () => {
         this.monitor.conversationMode = !this.monitor.conversationMode;
-        
-        // Save to storage
-        await chrome.storage.local.set({ conversationMode: this.monitor.conversationMode });
-        console.log(`💾 Saved conversation mode: ${this.monitor.conversationMode}`);
-        
-        // Update visuals immediately
+        chrome.storage.local.set({ conversationMode: this.monitor.conversationMode });
         updateToggleVisuals(this.monitor.conversationMode);
-        
-        // Update the main status display
         this.updateStatusDisplay();
-        
-        // Handle monitoring state
         if (this.monitor.conversationMode) {
-          console.log("🎤 Starting monitoring...");
-          this.monitor.startMonitoring();
-          // Reset state for clean start
-          this.monitor.resetForNewResponse(); 
-          // Process any existing response
-          setTimeout(() => {
-            this.monitor.processStreamUpdate();
-          }, 100);
+            this.monitor.startMonitoring();
+            // When manually enabling, reset state to cleanly process current/next response
+            this.monitor.currentResponseElement = null; 
+            this.monitor.lastCleanedText = "";
+            this.monitor.lastProcessedText = "";
+            this.monitor.currentResponseText = "";
+            this.monitor.processStreamUpdate(); // Try to process immediately
         } else {
-          console.log("🎧 Stopping monitoring...");
-          this.monitor.stopMonitoring();
-          // Send any final chunk before stopping
-          this.monitor.sendFinalChunk(); 
+            this.monitor.stopMonitoring();
+            // When turning off, ensure any pending text for the current response is finalized.
+            if (this.monitor.currentResponseElement) {
+                 const currentElementCleanedFullText = this.monitor.lastProcessedText;
+                 if (currentElementCleanedFullText && currentElementCleanedFullText.length > this.monitor.lastCleanedText.length) {
+                    const remainingTextToSend = currentElementCleanedFullText.substring(this.monitor.lastCleanedText.length).trim();
+                    if (remainingTextToSend.length > 0) {
+                        const baseId = this.monitor.generateResponseId(this.monitor.currentResponseElement);
+                        const responseId = `${baseId}-final-onstop-${this.monitor.chunkCounterForElement++}`;
+                        console.log(`📤 Sending final chunk due to stopping monitor: "${remainingTextToSend.substring(0, 50)}..."`);
+                        this.monitor.sendStreamChunk(remainingTextToSend, true, responseId);
+                         const separator = (this.monitor.lastCleanedText.length > 0 && !this.monitor.lastCleanedText.endsWith(' ') && !remainingTextToSend.startsWith(' ')) ? " " : "";
+                         this.monitor.lastCleanedText += separator + remainingTextToSend;
+                    }
+                }
+            }
         }
-        
-        console.log(`✅ Toggle complete. New state: ${this.monitor.conversationMode}`);
-        
-      } catch (error) {
-        console.error("❌ Error in toggle handler:", error);
-        // Revert visual state on error
-        updateToggleVisuals(!this.monitor.conversationMode);
-      }
     };
 
-    // Add elements to container
     toggleContainer.appendChild(label);
     toggleContainer.appendChild(toggleSwitch);
-    
-    // Add status text below the toggle
-    const toggleWrapper = document.createElement('div');
-    toggleWrapper.appendChild(toggleContainer);
-    toggleWrapper.appendChild(statusText);
-    
-    panel.appendChild(toggleWrapper);
-    
-    // Store reference for external updates
-    this.conversationToggle = {
-      updateVisuals: updateToggleVisuals,
-      statusText: statusText
-    };
+    panel.appendChild(toggleContainer);
   }
 
   detectAndDisplay() {
-    this.monitor.resetForNewResponse(); 
+    this.monitor.resetForNewResponse(); // This now handles finalization of old and full reset
     const responseElement = this.monitor.findClaudeResponse();
-    
-    if (CONFIG.ui.enablePreview) {
-      const textPreview = document.getElementById('text-preview');
-      
-      if (responseElement) {
-          this.currentText = responseElement.textContent || "";
-          const maxLength = CONFIG.ui.previewMaxLength || 500;
-          textPreview.textContent = this.currentText.substring(0, maxLength) + (this.currentText.length > maxLength ? "..." : "");
-          document.getElementById('status').textContent = 'Response detected.';
-          
-          this.monitor.currentResponseElement = responseElement;
-          this.monitor.currentResponseText = ""; 
-          this.monitor.lastSentLength = 0;
-          this.monitor.chunkCounterForElement = 0;
-          this.monitor.processedChunks.clear();
-          this.monitor.lastProcessedText = "";
-          this.monitor.lastCleanedText = "";
-          this.monitor.processStreamUpdate();
+    const textPreview = document.getElementById('text-preview');
 
-      } else {
-          textPreview.textContent = 'No Claude response found.';
-          document.getElementById('status').textContent = 'No response found.';
-          this.currentText = "";
-      }
+    if (responseElement) {
+        // this.currentText is a property of TTSControlPanel, not ClaudeStreamMonitor.
+        // It's used for the preview area if needed, but primary processing is in monitor.
+        this.currentText = responseElement.textContent || ""; 
+        textPreview.textContent = this.currentText.substring(0, 500) + (this.currentText.length > 500 ? "..." : "");
+        document.getElementById('status').textContent = 'Response detected.';
+        
+        // Set the monitor's current element and trigger processing.
+        // resetForNewResponse already cleared the monitor's state.
+        this.monitor.currentResponseElement = responseElement; 
+        this.monitor.processStreamUpdate(); // Start processing the new element
+
     } else {
-      // If preview is disabled, still do the detection logic
-      if (responseElement) {
-          this.currentText = responseElement.textContent || "";
-          document.getElementById('status').textContent = 'Response detected.';
-          
-          this.monitor.currentResponseElement = responseElement;
-          this.monitor.currentResponseText = ""; 
-          this.monitor.lastSentLength = 0;
-          this.monitor.chunkCounterForElement = 0;
-          this.monitor.processedChunks.clear();
-          this.monitor.lastProcessedText = "";
-          this.monitor.lastCleanedText = "";
-          this.monitor.processStreamUpdate();
-      } else {
-          document.getElementById('status').textContent = 'No response found.';
-          this.currentText = "";
-      }
+        textPreview.textContent = 'No Claude response found.';
+        document.getElementById('status').textContent = 'No response found.';
+        this.currentText = "";
     }
   }
 
@@ -1217,37 +1131,30 @@ class TTSControlPanel {
 
     if (!statusDiv || !lockDiv || !serverStatusDiv) return;
 
-    // Update main status
     statusDiv.textContent = this.monitor.conversationMode ? '🎤 Streaming Active' : '🎧 Streaming Paused';
     statusDiv.style.color = this.monitor.conversationMode ? '#86E0A2' : '#D4A574';
 
-    // Update processing lock
     lockDiv.style.display = this.monitor.processingLock ? 'block' : 'none';
     lockDiv.textContent = this.monitor.processingLock ? '⚙️ Processing...' : '';
 
-    // Update server status
     serverStatusDiv.textContent = this.monitor.serverHealthy ? '✅ Server OK' : '❌ Server Issue';
     serverStatusDiv.style.color = this.monitor.serverHealthy ? '#86E0A2' : '#E07A7A';
 
-    // Show failed requests count if any
-    if (this.monitor.failedRequests.length > 0) {
-      serverStatusDiv.textContent += ` (${this.monitor.failedRequests.length} queued)`;
-    }
-    
-    // Update toggle visuals if available
-    if (this.conversationToggle) {
-      this.conversationToggle.updateVisuals(this.monitor.conversationMode);
-    }
-    
-    console.log(`📊 Status updated - Mode: ${this.monitor.conversationMode}, Processing: ${this.monitor.processingLock}, Server: ${this.monitor.serverHealthy}`);
+    // const textPreview = document.getElementById('text-preview');
+    // if (textPreview && this.monitor.currentResponseElement) {
+        // const currentFullText = this.monitor.currentResponseElement.textContent || "";
+        // const cleanedPreview = this.monitor.lastCleanedText.substring(0, 200) + (this.monitor.lastCleanedText.length > 200 ? "..." : "");
+        // const newTextPreview = (currentFullText.substring(this.monitor.lastCleanedText.length) || "").substring(0,100);
+        // textPreview.textContent = `Cleaned: "${cleanedPreview}"\nNewRaw: "${newTextPreview}..."`; // Example of more detailed preview
+    // }
   }
 
   initPeriodicUpdates() {
     setInterval(() => {
-      this.updateStatusDisplay();
+        this.updateStatusDisplay();
     }, 1000);
   }
-} 
+}
 
 if (typeof claudeStreamMonitor === 'undefined' || !claudeStreamMonitor) {
   var claudeStreamMonitor = new ClaudeStreamMonitor();
@@ -1260,10 +1167,18 @@ if (typeof claudeStreamMonitor === 'undefined' || !claudeStreamMonitor) {
       if (!claudeStreamMonitor.isMonitoring) {
         claudeStreamMonitor.startMonitoring();
       }
+      // When loading, if conversation mode is on, try to process any existing response.
+      // Reset state before first processing attempt on load.
+      claudeStreamMonitor.currentResponseElement = null; 
+      claudeStreamMonitor.lastCleanedText = "";
+      claudeStreamMonitor.lastProcessedText = "";
+      claudeStreamMonitor.currentResponseText = "";
+      claudeStreamMonitor.processStreamUpdate();
+
       ttsPanel.updateStatusDisplay(); 
     } else {
       claudeStreamMonitor.conversationMode = false;
-      ttsPanel.updateStatusDisplay();
+       ttsPanel.updateStatusDisplay();
     }
   });
 }
