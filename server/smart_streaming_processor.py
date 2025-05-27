@@ -56,7 +56,12 @@ class StreamingTTSHandler:
         if base_id not in self.response_chunks:
             self.response_chunks[base_id] = []
             self.chunk_counter[base_id] = 0 # Initialize counter for the base_id
-            logger.info(f"🆕 Starting new response: {base_id}")
+            if base_id.startswith('batch-'):
+                logger.info(f"🚢 Starting new batch: {base_id}")
+            elif base_id.startswith('activation-'):
+                logger.info(f"📦 Processing activation batch: {base_id}")
+            else:
+                logger.info(f"🆕 Starting new response: {base_id}")
         
         self.response_chunks[base_id].append(chunk)
         # self.chunk_counter[base_id] = max(self.chunk_counter[base_id], sequence_num) # Keep track of highest sequence
@@ -102,8 +107,11 @@ class StreamingTTSHandler:
             # Example: manual-abc-123-tts-0 -> base: manual-abc-123
             
             # Try to find a consistent base:
-            # If it starts with 'resp-' and has at least 3 parts (resp, pos, hash)
-            if base_id_parts[0] == 'resp' and len(base_id_parts) >= 3:
+            # Handle new batch-raft format: batch-1-raft-2
+            if base_id_parts[0] == 'batch' and len(base_id_parts) >= 2:
+                clean_base_id = '-'.join(base_id_parts[:2]) # batch-1
+            # If it starts with 'resp-' and has at least 3 parts (resp, pos, hash) 
+            elif base_id_parts[0] == 'resp' and len(base_id_parts) >= 3:
                 clean_base_id = '-'.join(base_id_parts[:3]) # resp-pos-hash
             # If it starts with 'manual-' and has at least 2 parts (manual, hash/ts)
             elif base_id_parts[0] == 'manual' and len(base_id_parts) >=2:
