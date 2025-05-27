@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import asyncio
-import sys # Keep for other potential uses, but path manipulation will be removed
+import sys 
 import os
 import time
 import traceback
@@ -23,24 +23,6 @@ logging.getLogger('quart.serving').setLevel(logging.WARNING)
 
 from quart import Quart, request, jsonify
 from quart_cors import cors
-
-# REMOVE THIS BLOCK START
-# # Ensure LAURA_scripts is in the Python path
-# # This assumes tts_server.py is in claude-to-speech and LAURA_scripts is a sibling or specified path
-# script_dir = Path(__file__).resolve().parent
-# laura_scripts_path = script_dir.parent / "LAURA_scripts" # Adjust if LAURA_scripts is elsewhere
-# if str(laura_scripts_path) not in sys.path:
-#     sys.path.insert(0, str(laura_scripts_path))
-# # Fallback if the above structure isn't fixed, use the original hardcoded path as a last resort
-# if not (laura_scripts_path / "audio_manager_plugin.py").exists():
-#      # Original path, adjust if your structure is different
-#     original_laura_path = "/home/user/claude-to-speech/LAURA_scripts"
-#     if original_laura_path not in sys.path:
-#         sys.path.insert(0, original_laura_path)
-# REMOVE THIS BLOCK END
-
-# Direct imports, assuming audio_manager_plugin.py and smart_streaming_processor.py
-# are in the same directory (server/) or installed in the Python environment.
 from audio_manager_plugin import AudioManager
 from smart_streaming_processor import StreamingTTSHandler
 
@@ -210,23 +192,17 @@ async def startup():
         if hasattr(audio_manager, 'initialize_input') and asyncio.iscoroutinefunction(audio_manager.initialize_input):
             await audio_manager.initialize_input()
         elif hasattr(audio_manager, 'initialize_input'):
-             audio_manager.initialize_input()
-
+            audio_manager.initialize_input()
+            
         if audio_manager.is_initialized():
             logger.info("Audio manager initialized successfully.")
             streaming_handler = StreamingTTSHandler(audio_manager)
             logger.info("StreamingTTSHandler initialized.")
         else:
             logger.error("Audio manager failed to initialize properly. TTS functionality may be impaired.")
-            # audio_manager might still be an instance but not fully functional
-            # streaming_handler should ideally not be initialized if audio_manager failed critically
-            if not ELEVENLABS_API_KEY or ElevenLabs is None or not MPG123_PATH: # Check critical components
-                 streaming_handler = None # Prevent handler if core TTS/playback is impossible
-                 logger.error("StreamingTTSHandler NOT initialized due to critical audio manager failure.")
-            else: # If some non-critical init failed, maybe still try
-                 streaming_handler = StreamingTTSHandler(audio_manager)
-                 logger.warning("StreamingTTSHandler initialized, but audio manager reported issues.")
-
+            streaming_handler = None
+            logger.error("StreamingTTSHandler NOT initialized due to critical audio manager failure.")
+            
     except Exception as e:
         logger.error(f"Fatal error during audio manager startup: {e}", exc_info=True)
         audio_manager = None
