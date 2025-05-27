@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
 import ctypes
 import datetime
+import shutil
 
 try:
     from elevenlabs.client import ElevenLabs
@@ -19,11 +20,44 @@ except ImportError:
     ElevenLabs = None  # Will raise at runtime if used without install
 
 # ====== CONFIGURATION SECTION ======
-ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "sk_2e9430dbeccdecec954973179fe998b4bec86ba9c081f300")
-ELEVENLABS_VOICE = os.environ.get("ELEVENLABS_VOICE", "L.A.U.R.A.")
-ELEVENLABS_MODEL = os.environ.get("ELEVENLABS_MODEL", "eleven_flash_v2_5")
-AUDIO_CACHE_DIR = os.path.expanduser("~/LAURA/audio_cache")
+try:
+    from config.tts_config import ELEVENLABS_API_KEY, ACTIVE_VOICE, VOICES_DATA
+    ELEVENLABS_VOICE = VOICES_DATA.get(ACTIVE_VOICE, {}).get("name", ACTIVE_VOICE)
+    ELEVENLABS_MODEL = VOICES_DATA.get(ACTIVE_VOICE, {}).get("model", "eleven_turbo_v2")
+    print(f"✅ Loaded from tts_config: Voice={ELEVENLABS_VOICE}, Model={ELEVENLABS_MODEL}")
+except ImportError:
+    print("⚠️ Failed to import from config.tts_config. Using environment variables.")
+    ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
+    ELEVENLABS_VOICE = os.environ.get("ELEVENLABS_VOICE", "L.A.U.R.A.")
+    ELEVENLABS_MODEL = os.environ.get("ELEVENLABS_MODEL", "eleven_turbo_v2")
+except Exception as e:
+    print(f"⚠️ Config error: {e}. Using environment variables.")
+    ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
+    ELEVENLABS_VOICE = os.environ.get("ELEVENLABS_VOICE", "L.A.U.R.A.")
+    ELEVENLABS_MODEL = os.environ.get("ELEVENLABS_MODEL", "eleven_turbo_v2")
+
+if not ELEVENLABS_API_KEY:
+    print("❌ CRITICAL: ElevenLabs API key not found!")
+    raise ValueError("ELEVENLABS_API_KEY must be set in config/secret.py or environment")
+
+# Audio cache directory
+AUDIO_CACHE_DIR = os.path.expanduser("~/claude-to-speech/audio_cache")
 os.makedirs(AUDIO_CACHE_DIR, exist_ok=True)
+
+# Dynamic mpg123 path
+MPG123_PATH = shutil.which("mpg123")
+if not MPG123_PATH:
+    common_paths = ["/usr/bin/mpg123", "/usr/local/bin/mpg123", "/opt/homebrew/bin/mpg123"]
+    for path in common_paths:
+        if os.path.exists(path):
+            MPG123_PATH = path
+            break
+
+if not MPG123_PATH:
+    print("❌ CRITICAL: mpg123 not found!")
+    raise FileNotFoundError("mpg123 not found. Install with: sudo apt-get install mpg123")
+
+print(f"🎵 Audio setup: Cache={AUDIO_CACHE_DIR}, mpg123={MPG123_PATH}")
 # ===================================
 
 @dataclass
@@ -121,7 +155,11 @@ class AudioManager:
 
             await self.audio_queue.put((audio_file, None, delete_after_play))
 
-            if not self.is_processing_queue or (self.queue_processor_task and self.queue_processor_task.done()):
+            # Always ensure processor is running when items are queued
+            if not self.is_processing_queue:
+                self.queue_processor_task = asyncio.create_task(self.process_audio_queue())
+            elif self.queue_processor_task and self.queue_processor_task.done():
+                print("Restarting completed queue processor task")
                 self.queue_processor_task = asyncio.create_task(self.process_audio_queue())
         else:
             print("No audio file or text provided to queue_audio.")
@@ -187,11 +225,9 @@ class AudioManager:
         self.is_processing_queue = True
         print("Audio queue processor started.")
         try:
-            while self.is_processing_queue: # Loop based on the flag
+            while self.is_processing_queue:
                 try:
-                    audio_file, _, delete_after_play = await asyncio.wait_for(
-                        self.audio_queue.get(), timeout=1.0
-                    )
+                    audio_file, _, delete_after_play = await self.audio_queue.get()
                     if audio_file: # Ensure audio_file is not None
                         print(f"Processing from queue: {audio_file}")
                         await self.play_audio(audio_file, delete_after_play)
@@ -261,14 +297,8 @@ class AudioManager:
                     async with self.state_lock:
                         self.state.expected_duration = 2.0 # Default fallback
 
-                # Ensure mpg123 is available and executable
-                mpg123_path = "/usr/bin/mpg123" # Or use shutil.which("mpg123")
-                if not os.path.exists(mpg123_path):
-                    print(f"CRITICAL: mpg123 not found at {mpg123_path}. Cannot play audio.")
-                    raise FileNotFoundError(f"mpg123 not found at {mpg123_path}")
-
                 self.current_process = await asyncio.create_subprocess_shell(
-                    f'{mpg123_path} -q "{audio_file}"',
+                    f'{MPG123_PATH} -q "{audio_file}"',
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.PIPE # Capture stderr for debugging
                 )
