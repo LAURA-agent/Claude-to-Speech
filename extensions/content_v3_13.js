@@ -1,26 +1,31 @@
-// Smart Streaming Content Script for Claude - Version 3.4 - Enhanced Processing Logic
-console.log("🚀 Smart Streaming Claude TTS loaded - Version 3.4 (Patched)");
-const QUIET_MODE = true;
+// Claude TTS Stream Monitor - Content-Aware State Management with Debug Framework
+console.log("🚀 Claude TTS Stream Monitor - Content-Aware Version with Debug");
+
+// Debug Framework
+function debugState(label, state) {
+  console.log(`[TTS-DEBUG] ${label}:`, JSON.parse(JSON.stringify(state)));
+}
 
 class ClaudeStreamMonitor {
   constructor() {
     this.conversationMode = false;
     this.isMonitoring = false;
     this.debounceTimer = null;
+    this.completionTimer = null;
     this.processingLock = false;
-    this.currentResponseElement = null;
-    this.conversationModeStartTime = null;
-    this.isRetrying = false;
+    this.sentChunks = new Set();
+    
+    // Response Processing State
+    this.baseline = ""; // Everything we've processed so far
+    this.ttsAccumulator = ""; // Clean conversational text being built
+    this.conversationalDebounceCount = 0; // Counter for conversational content only
+    this.currentRaft = 1;
+    this.responsePhase = 'IDLE'; // IDLE, THINKING, RESPONDING, COMPLETE
+    
+    // Server communication
     this.serverHealthy = true;
     this.failedRequests = [];
-    this.isInitializing = false;
-    
-    // Raft system state
-    this.currentBatch = 1;
-    this.currentRaft = 1;
-    this.sentSoFar = "";
-    this.isProcessingBatch = false;
-    this.rafts = []; // For debugging/logging
+    this.isRetrying = false;
     
     this.loadSettings();
     this.resetServerOnPageLoad();
@@ -29,122 +34,56 @@ class ClaudeStreamMonitor {
 
   async startHealthCheck() {
     try {
-      const result = await fetch("http://127.0.0.1:5000/health", {
-        method: 'GET',
-      }).then(res => res.json());
-
+      const result = await fetch("http://127.0.0.1:5000/health", { method: 'GET' }).then(res => res.json());
       if (result.status === "ok") {
-        if (!this.serverHealthy) console.log("✅ TTS Server is healthy");
+        if (!this.serverHealthy) console.log("✅ TTS Server healthy");
         this.serverHealthy = true;
         if (this.failedRequests.length > 0 && !this.isRetrying) {
           this.retryFailedRequests();
         }
       } else {
-        if (this.serverHealthy) console.error("❌ TTS Server reported unhealthy status:", result);
         this.serverHealthy = false;
       }
     } catch (e) {
-      if (this.serverHealthy) console.error("❌ TTS Server health check failed:", e);
       this.serverHealthy = false;
     }
-    setTimeout(() => this.startHealthCheck(), 30000);
+    setTimeout(() => this.startHealthCheck(), 10000);
   }
 
   async retryFailedRequests() {
     if (this.isRetrying || this.failedRequests.length === 0 || !this.serverHealthy) return;
     this.isRetrying = true;
-    console.log(`🔄 Retrying ${this.failedRequests.length} failed requests`);
     
     const requestsToRetry = [...this.failedRequests];
     this.failedRequests = [];
     
     for (const req of requestsToRetry) {
       if (!this.serverHealthy) {
-        console.warn("❌ Server unhealthy, pausing retries.");
         this.failedRequests.unshift(...requestsToRetry.slice(requestsToRetry.indexOf(req)));
         break;
       }
       try {
-        console.log(`🔄 Retrying request for ${req.responseId} (Attempt after failure)`);
         await this.sendStreamChunk(req.text, req.isComplete, req.responseId, 0, true);
         await new Promise(resolve => setTimeout(resolve, 500));
       } catch (e) {
-        console.error(`❌ Retry attempt failed for ${req.responseId}:`, e);
+        console.error(`❌ Retry failed for ${req.responseId}:`, e);
       }
     }
     this.isRetrying = false;
   }
 
-  resetForNewResponse() {
-    console.log("🔄 Resetting for new response (explicit call via Detect Button)");
-    if (this.isProcessingBatch) {
-      this.finalizeBatch();
-    }
-    this.startNewBatch();
-    this.processStreamUpdate();
-  }
-
-  findClaudeResponse() {
-    const streamingElements = document.querySelectorAll('[data-is-streaming]');
-    if (streamingElements.length > 0) {
-      const latest = streamingElements[streamingElements.length - 1];
-      const isStreaming = latest.getAttribute('data-is-streaming') === 'true';
-      if (isStreaming) return latest;
-      const messageDiv = latest.querySelector('.font-claude-message');
-      return messageDiv || latest;
-    }
-
-    const completedElements = document.querySelectorAll('.font-claude-message');
-    if (completedElements.length > 0) {
-      return completedElements[completedElements.length - 1];
-    }
-
-    const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
-    if (assistantMessages.length > 0) {
-      const lastAssistantMessage = assistantMessages[assistantMessages.length - 1];
-      const messageContent = lastAssistantMessage.querySelector('.font-claude-message') ||
-        lastAssistantMessage.querySelector('div[data-is-response]') ||
-        lastAssistantMessage;
-      return messageContent;
-    }
-    return null;
-  }
-
-  async resetServerOnPageLoad() {
-    setTimeout(async () => {
-      try {
-        const result = await this.sendToServer("/reset_conversation", {
-          client_ip: 'browser',
-          response_id: 'page-refresh-' + Date.now()
-        });
-        if (result.success) console.log("🔄 Cleared server state after page load");
-        else console.error("❌ Failed to reset server state:", result.error);
-      } catch (error) { console.error("❌ Error resetting server:", error); }
-    }, 1000);
-  }
-
   async loadSettings() {
-    if (this.isInitializing) {
-      console.log("loadSettings: Already initializing, skipping.");
-      return;
-    }
-    this.isInitializing = true;
-    console.log("loadSettings: Starting to load settings.");
-    
     try {
       const result = await chrome.storage.local.get(['conversationMode']);
       const newMode = result.conversationMode || false;
-      console.log(`📊 Loaded conversation mode from storage: ${newMode}`);
 
-      if (newMode !== this.conversationMode || (newMode && !this.isMonitoring) || (!newMode && this.isMonitoring)) {
+      if (newMode !== this.conversationMode) {
         this.conversationMode = newMode;
-        if (this.conversationMode) {
-          if (!this.isMonitoring) this.startMonitoring();
-        } else {
-          if (this.isMonitoring) this.stopMonitoringAndFinalize();
+        if (newMode && !this.isMonitoring) {
+          this.startMonitoring();
+        } else if (!newMode && this.isMonitoring) {
+          this.stopMonitoring();
         }
-      } else {
-        console.log("loadSettings: No change in conversation mode or monitoring state required.");
       }
       
       if (window.ttsPanel) {
@@ -154,83 +93,28 @@ class ClaudeStreamMonitor {
     } catch (error) {
       console.error("❌ Error loading settings:", error);
       this.conversationMode = false;
-    } finally {
-      this.isInitializing = false;
-      console.log("loadSettings: Finished loading settings.");
     }
   }
 
   startMonitoring() {
     if (this.isMonitoring) return;
-    console.log("🔄 Starting smart stream monitoring");
+    console.log("🔄 Starting stream monitoring");
     this.isMonitoring = true;
     this.conversationMode = true;
-    this.conversationModeStartTime = Date.now();
 
-    this.observer = new MutationObserver((mutations) => {
-      if (!this.conversationMode || this.processingLock) return;
-      
-      const hasClaudeMessageChanges = mutations.some(mutation => {
-        if (mutation.target === this.currentResponseElement || 
-            (this.currentResponseElement && this.currentResponseElement.contains(mutation.target))) {
-          return true;
-        }
-        return Array.from(mutation.addedNodes).some(node =>
-          node.nodeType === 1 && (
-            node.classList?.contains('font-claude-message') ||
-            node.querySelector?.('.font-claude-message') ||
-            node.hasAttribute?.('data-is-streaming') ||
-            node.querySelector?.('[data-is-streaming]')
-          )
-        ) || (mutation.type === 'characterData' && mutation.target.parentElement &&
-          (mutation.target.parentElement.closest?.('.font-claude-message') || 
-           mutation.target.parentElement.closest?.('[data-is-streaming]'))
-        );
-      });
-      
-      if (hasClaudeMessageChanges) this.debounceAndProcess();
+    this.observer = new MutationObserver(() => {
+      if (this.conversationMode && !this.processingLock) {
+        this.debounceAndProcess();
+      }
     });
 
-    const possibleContainers = [
-      document.evaluate('/html/body/div[2]/div[2]/div/div[1]/div/div/div[1]', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue,
-      document.querySelector('main'),
-      document.querySelector('.conversation-container'),
-      document.querySelector('[data-testid="conversation-main"]'),
-      document.body
-    ];
-    const target = possibleContainers.find(container => container !== null);
-
-    if (target) {
-      this.observer.observe(target, { childList: true, subtree: true, characterData: true });
-      console.log("✅ Observer attached to container:", target);
-
-      // Handle existing response (toggle activation scenario)
-      const existingResponse = this.findClaudeResponse();
-      if (existingResponse) {
-        console.log("🔍 Found existing response on start - creating activation batch");
-        this.handleToggleActivation(existingResponse);
-      } else {
-        console.log("📝 No existing response found on start - ready for new content");
-      }
-    } else {
-      console.error("❌ Could not find any suitable container for observing");
-    }
+    const container = document.body;
+    this.observer.observe(container, { childList: true, subtree: true, characterData: true });
+    this.setBaseline();
   }
 
-  handleToggleActivation(element) {
-    // Create special "activation batch" for existing response
-    const existingText = this.cleanText(element.textContent || "");
-    if (existingText.length > 0) {
-      console.log("📦 Creating activation batch for existing response");
-      const activationRaftId = `activation-batch-${Date.now()}`;
-      this.sendStreamChunk(existingText, true, activationRaftId);
-      console.log(`🚢 ACTIVATION RAFT: "${existingText.substring(0, 50)}..." (${existingText.length} chars)`);
-    }
-    // Don't increment batch number - next real response will be Batch 1
-  }
-
-  stopMonitoringAndFinalize() {
-    console.log("⏹️ Stopping stream monitoring and finalizing.");
+  stopMonitoring() {
+    console.log("⏹️ Stopping stream monitoring");
     this.isMonitoring = false;
     this.conversationMode = false;
     
@@ -239,304 +123,327 @@ class ClaudeStreamMonitor {
       this.observer = null;
     }
     clearTimeout(this.debounceTimer);
+    clearTimeout(this.completionTimer);
     
-    if (this.isProcessingBatch) {
-      this.finalizeBatch();
+    if (this.responsePhase !== 'IDLE') {
+      this.completeResponse();
     }
+  }
+
+  findClaudeResponse() {
+    const claudeMessages = document.querySelectorAll('.font-claude-message');
+    return claudeMessages.length > 0 ? claudeMessages[claudeMessages.length - 1] : null;
+  }
+
+  setBaseline() {
+    const element = this.findClaudeResponse();
+    if (element) {
+      this.baseline = element.textContent || "";
+      console.log(`📸 Baseline set: ${this.baseline.length} chars`);
+    } else {
+      this.baseline = "";
+      console.log("📸 No existing response - baseline cleared");
+    }
+    
+    this.resetResponseState();
+  }
+
+  resetResponseState() {
+    debugState("RESET RESPONSE STATE", {
+      oldPhase: this.responsePhase,
+      oldAccLen: this.ttsAccumulator.length,
+      oldDebounceCount: this.conversationalDebounceCount,
+      oldRaft: this.currentRaft
+    });
+    
+    this.ttsAccumulator = "";
+    this.conversationalDebounceCount = 0;
+    this.currentRaft = 1;
+    this.responsePhase = 'IDLE';
+    
+    debugState("STATE RESET COMPLETE", {
+      phase: this.responsePhase,
+      raft: this.currentRaft,
+      debounceCount: this.conversationalDebounceCount
+    });
+  }
+
+  resetForNewResponse() {
+    console.log("🔄 Manual baseline reset");
+    this.completeResponse();
+    this.setBaseline();
   }
 
   debounceAndProcess() {
     clearTimeout(this.debounceTimer);
     this.debounceTimer = setTimeout(() => {
-      this.processStreamUpdate();
-    }, 250);
+      this.processContent();
+    }, 500); // 500ms debounce as discussed
   }
 
-  // Raft System Functions
-  startNewBatch() {
-    if (this.isProcessingBatch) {
-      this.finalizeBatch();
-    }
-    this.isProcessingBatch = true;
-    this.currentRaft = 1;
-    this.sentSoFar = "";
-    this.rafts = [];
-    console.log(`🆕 Starting Batch ${this.currentBatch}`);
-  }
-
-  finalizeBatch() {
-    console.log(`📋 Batch ${this.currentBatch} completed with ${this.currentRaft - 1} rafts`);
-    this.currentBatch++;
-    this.currentRaft = 1;
-    this.sentSoFar = "";
-    this.isProcessingBatch = false;
-    this.rafts = [];
-  }
-
-  sendRaft(content, reason) {
-    if (!content || content.trim().length === 0) return;
-    const chunkId = `batch-${this.currentBatch}-raft-${this.currentRaft}`;
-    
-    // DEBUG: Show what's being sent to TTS
-    console.log(`🔍 DEBUG sending to TTS: "${content.substring(0, 100)}..."`);
-    
-    // Send to TTS server
-    this.sendStreamChunk(content, false, chunkId);
-    
-    // Update state
-    const separator = (this.sentSoFar.length > 0 && 
-                     !this.sentSoFar.endsWith(' ') && 
-                     !content.startsWith(' ')) ? " " : "";
-    this.sentSoFar += separator + content;
-    
-    // Log and track
-    const raft = {
-      batch: this.currentBatch,
-      raft: this.currentRaft,
-      content: content,
-      reason: reason,
-      timestamp: new Date().toISOString()
+  // Content Classification Engine
+  classifyContent(rawNewContent, element) {
+    const result = {
+      type: 'unknown', // 'thinking', 'conversational', 'code', 'artifact'
+      cleanContent: "",
+      shouldSkipTTS: false
     };
-    this.rafts.push(raft);
     
-    console.log(`🚢 RAFT ${this.currentBatch}-${this.currentRaft} (${reason}): "${content.substring(0, 50)}..." (${content.length} chars)`);
-    this.currentRaft++;
+    if (!rawNewContent) return result;
+    
+    // Check for thinking sections in the element
+    if (element) {
+      const thinkingSections = element.querySelectorAll('.transition-all.duration-400');
+      for (const section of thinkingSections) {
+        if (section.textContent && section.textContent.includes('Thought process')) {
+          result.type = 'thinking';
+          result.shouldSkipTTS = true;
+          result.cleanContent = rawNewContent; // Keep for baseline extension
+          return result;
+        }
+      }
+      
+      // Check for code blocks and artifacts
+      const codeElements = element.querySelectorAll('pre, code, .artifact-block-cell, [data-artifact-title]');
+      if (codeElements.length > 0) {
+        result.type = 'code';
+        result.shouldSkipTTS = true;
+        // Extract conversational text that comes before code blocks
+        let conversationalPart = rawNewContent;
+        codeElements.forEach(codeEl => {
+          const codeText = codeEl.textContent;
+          if (codeText) {
+            conversationalPart = conversationalPart.replace(codeText, '');
+          }
+        });
+        result.cleanContent = this.normalizeText(conversationalPart);
+        return result;
+      }
+    }
+    
+    // Default to conversational content
+    result.type = 'conversational';
+    result.shouldSkipTTS = false;
+    result.cleanContent = this.normalizeText(rawNewContent);
+    
+    return result;
   }
-
-  // Text Processing Functions
-  cleanText(text) {
+  
+  normalizeText(text) {
     if (!text) return "";
     
-    // Remove code blocks more thoroughly
-    text = text.replace(/```[\s\S]*?```/g,'');
-    
-    // Remove artifacts and function calls
+    // Remove function calls and results via text patterns
     text = text.replace(/<function_calls>[\s\S]*?<\/antml:function_calls>/gi, '');
-    text = text.replace(/<function_results>[\s\S]*?<\/function_results>/gi, '');
-    
-    // Remove thinking tags
-    text = text.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
-    
-    // Remove citations
-    text = text.replace(/]*>[\s\S]*?<\/antml:cite>/gi, '');
+    text = text.replace(/<fnr>[\s\S]*?<\/function_results>/gi, '');
     
     // Normalize whitespace
-    text = text.replace(/\n\s*\n/g, '§PARAGRAPH§')
-              .replace(/\s+/g, ' ')
-              .replace(/§PARAGRAPH§/g, '\n\n')
-              .trim();
-    
-    // Remove analysis artifacts
-    text = text.replace(/(Analyzing|Thinking|Parsing|Considering|Evaluating|Pondering)[^.]*\./gi, '').trim();
-    
-    // Clean up common text artifacts
-    text = text.replace(/You're absolutely right/g, "You're right");
-    
-    return text;
+    return text.replace(/\n\s*\n/g, '\n\n').replace(/[ \t]+/g, ' ').trim();
   }
 
-  hasCodeBlockOrArtifact(text, element) {
-    // Check for code blocks in text
-    if (/```/.test(text)) return true;
-    
-    // Check for code elements in DOM
-    if (element && element.querySelector('pre, code')) return true;
-    
-    // Check for artifact selectors
-    const artifactSelectors = [
-      '.artifact-block-cell',
-      '[data-artifact-title]',
-      'button.flex.text-left.font-styrene',
-      '[aria-label="Preview contents"]'
-    ];
-    
-    if (element) {
-      for (const selector of artifactSelectors) {
-        if (element.querySelector(selector)) return true;
-      }
-    }
-    
-    return false;
-  }
-
-  findCompleteSentences(text) {
-    const sentences = [];
-    if (!text || text.trim().length === 0) return sentences;
-
-    const parts = text.split(/([.!?])\s+/);
-    let currentSentence = "";
-    const abbreviations = ['Mr.', 'Mrs.', 'Ms.', 'Dr.', 'Prof.', 'Sr.', 'Jr.', 'St.', 'Co.', 'Inc.', 'Ltd.', 'vs.', 'i.e.', 'e.g.', 'etc.'];
-
-    for (let i = 0; i < parts.length; i++) {
-      currentSentence += parts[i];
-      if (i + 1 < parts.length && /[.!?]/.test(parts[i+1])) {
-        const potentialAbbreviation = currentSentence.split(/\s+/).pop() + parts[i+1];
-        if (!abbreviations.some(abbr => potentialAbbreviation.startsWith(abbr))) {
-          currentSentence += parts[i+1];
-          if (currentSentence.trim().length > 0) {
-            sentences.push(currentSentence.trim());
-          }
-          currentSentence = "";
-          i++;
-        } else {
-          currentSentence += parts[i+1];
-          i++;
-        }
-      }
-    }
-    if (currentSentence.trim().length > 0) {
-      sentences.push(currentSentence.trim());
-    }
-    return sentences;
-  }
-
-  isClaudeTyping(responseElement) {
-    if (!responseElement) return false;
-    if (responseElement.getAttribute('data-is-streaming') === 'true') return true;
-    if (responseElement.closest('[data-is-streaming="true"]')) return true;
-
-    const typingSelectors = [
-      '.typing-indicator', '.claude-typing-indicator', '.animate-pulse',
-      '[class*="cursor"]', '.blinking-cursor', '[class*="streaming"]', '[class*="generating"]'
-    ];
-
-    for (const selector of typingSelectors) {
-      if (responseElement.querySelector(selector) || responseElement.closest(selector)) return true;
-    }
-
-    const sendButton = document.querySelector('button[type="submit"]:disabled, button[aria-label*="Send"]:disabled, button[aria-label*="send"]:disabled');
-    if (sendButton) return true;
-
-    return false;
-  }
-
-  applyRaftRules(newContent, isStreaming, element) {
-    // 1. Check for code blocks/artifacts (priority send)
-    if (this.hasCodeBlockOrArtifact(newContent, element)) {
-      // Send content BEFORE the first code block only
-      const codeBlockIndex = newContent.search(/```/);
-      if (codeBlockIndex > 0) {
-        const textBeforeCode = newContent.substring(0, codeBlockIndex).trim();
-        if (textBeforeCode.length > 0) {
-          this.sendRaft(textBeforeCode, "content_before_code_block");
-          return;
-        }
-      }
-      // If no text before code block, skip this entirely
-      console.log("🚫 Skipping content that starts with code block");
-      return;
-    }
-    
-    // 2. First raft special case - look for meaningful opening
-    if (this.currentRaft === 1 && this.sentSoFar.length === 0 && newContent.length > 100) {
-      const sentences = this.findCompleteSentences(newContent);
-      if (sentences.length >= 2) {
-        const firstTwoSentences = sentences.slice(0, 2).join(" ");
-        this.sendRaft(firstTwoSentences, "first_meaningful_chunk");
-        return;
-      }
-    }
-    
-    // 3. Paragraph boundaries
-    const paragraphMatch = newContent.match(/^(.+?\n\n)/);
-    if (paragraphMatch && paragraphMatch[1].trim().length > 20) {
-      this.sendRaft(paragraphMatch[1].trim(), "paragraph_boundary");
-      return;
-    }
-    
-    // 4. Sentence completion for longer content
-    if (newContent.length > 180) {
-      const sentences = this.findCompleteSentences(newContent);
-      if (sentences.length > 0 && sentences[0].length > 30) {
-        this.sendRaft(sentences[0], "sentence_complete");
-        return;
-      }
-    }
-    
-    // 5. Substantial content without specific boundaries
-    if (isStreaming && newContent.length > 200) {
-      this.sendRaft(newContent, "substantial_content");
-      return;
-    }
-    
-    // 6. Final raft when streaming stops OR set completion timer
-    if (!isStreaming && newContent.length > 0) {
-      this.sendRaft(newContent, "response_complete");
-      this.finalizeBatch();
-    } else if (newContent.length > 0) {
-      // Set/reset completion timer for remaining content
-      clearTimeout(this.completionTimer);
-      this.completionTimer = setTimeout(() => {
-        this.sendFinalRemainingContent();
-      }, 3000);
-    }
-}
-
-  async processStreamUpdate() {
-    if (!this.conversationMode || this.processingLock) return;
+  processContent() {
+    if (this.processingLock) return;
     this.processingLock = true;
 
     try {
       const element = this.findClaudeResponse();
       if (!element) {
+        debugState("NO ELEMENT FOUND", { elementExists: false });
         this.processingLock = false;
         return;
       }
 
-      // Update current element reference
-      const isNewElement = element !== this.currentResponseElement;
-      if (isNewElement) {
-        console.log("🔄 New response element detected");
-        this.currentResponseElement = element;
-        
-        // Start new batch for genuinely new response
-        if (this.isProcessingBatch) {
-          this.finalizeBatch();
-        }
-        this.startNewBatch();
-      }
-
-      const currentFullText = this.cleanText(element.textContent || "");
-      if (!currentFullText) {
-        this.processingLock = false;
-        return;
-      }
-
-      // Calculate new content since last send
-      let newContent;
-      if (currentFullText.startsWith(this.sentSoFar)) {
-        newContent = currentFullText.substring(this.sentSoFar.length).trim();
+      const currentRawContent = element.textContent || "";
+      
+      // Calculate new content beyond baseline
+      let newRawContent = "";
+      if (currentRawContent.startsWith(this.baseline)) {
+        newRawContent = currentRawContent.substring(this.baseline.length);
+        debugState("BASELINE MATCH", { 
+          baselineLen: this.baseline.length, 
+          currentLen: currentRawContent.length,
+          newContentLen: newRawContent.length 
+        });
       } else {
-        // Text diverged - this can happen with DOM updates
-        console.log("📝 Text diverged, processing full content");
-        newContent = currentFullText;
-        // Reset sent tracking for this batch
-        this.sentSoFar = "";
+        // Content structure changed - reset and process all
+        debugState("BASELINE MISMATCH - RESET", { 
+          baselineStart: this.baseline.substring(0, 100),
+          currentStart: currentRawContent.substring(0, 100),
+          baselineLen: this.baseline.length,
+          currentLen: currentRawContent.length
+        });
+        this.baseline = "";
+        this.resetResponseState();
+        newRawContent = currentRawContent;
       }
 
-      if (!newContent || newContent.length === 0) {
+      if (!newRawContent.trim()) {
+        debugState("NO NEW CONTENT", { newContentLen: newRawContent.length });
         this.processingLock = false;
         return;
       }
 
-      // Ensure we're processing a batch
-      if (!this.isProcessingBatch) {
-        this.startNewBatch();
-      }
+      // Classify the new content
+      const classification = this.classifyContent(newRawContent, element);
+      debugState(`CLASSIFY [${classification.type}]`, { 
+        newRawContentLen: newRawContent.length,
+        cleanContentLen: classification.cleanContent.length,
+        contentPreview: newRawContent.substring(0, 100),
+        cleanPreview: classification.cleanContent.substring(0, 100)
+      });
 
-      const isStreaming = this.isClaudeTyping(element);
-      console.log(`📝 Processing ${newContent.length} new chars, streaming: ${isStreaming}`);
+      // Handle based on content type and current phase
+      this.handleContentByType(classification, newRawContent);
 
-      this.applyRaftRules(newContent, isStreaming, element);
+      // Reset completion timer
+      clearTimeout(this.completionTimer);
+      this.completionTimer = setTimeout(() => {
+        debugState("COMPLETION TIMER FIRED", { phase: this.responsePhase });
+        this.completeResponse();
+      }, 2000);
 
     } catch (error) {
-      console.error("❌ Process error in processStreamUpdate:", error, error.stack);
+      debugState("PROCESSING ERROR", { error: error.message, stack: error.stack });
+      this.responsePhase = 'IDLE';
     } finally {
       this.processingLock = false;
     }
   }
 
-  // Server Communication (unchanged from original)
+  handleContentByType(classification, rawContent) {
+    switch (classification.type) {
+      case 'thinking':
+        debugState("PHASE TRANSITION", { from: this.responsePhase, to: 'THINKING' });
+        this.responsePhase = 'THINKING';
+        this.extendBaseline(rawContent);
+        break;
+        
+      case 'conversational':
+        if (this.responsePhase === 'THINKING' || this.responsePhase === 'IDLE') {
+          debugState("PHASE TRANSITION", { from: this.responsePhase, to: 'RESPONDING' });
+          this.responsePhase = 'RESPONDING';
+        }
+        this.handleConversationalContent(classification.cleanContent, rawContent);
+        break;
+        
+      case 'code':
+        debugState("CODE BOUNDARY DETECTED", { 
+          cleanContentLen: classification.cleanContent.length,
+          currentAccumulator: this.ttsAccumulator.length 
+        });
+        this.handleCodeBoundary(classification.cleanContent, rawContent);
+        break;
+    }
+  }
+
+  handleConversationalContent(cleanContent, rawContent) {
+    if (cleanContent && cleanContent.trim()) {
+      const oldAccumulator = this.ttsAccumulator;
+      // Add to accumulator
+      this.ttsAccumulator += (this.ttsAccumulator ? " " : "") + cleanContent;
+      
+      // Increment conversational debounce count
+      this.conversationalDebounceCount++;
+      
+      debugState("ACCUMULATE CONVERSATIONAL", {
+        debounceCount: this.conversationalDebounceCount,
+        oldAccLen: oldAccumulator.length,
+        newAccLen: this.ttsAccumulator.length,
+        addedContent: cleanContent.substring(0, 50)
+      });
+      
+      // Check if ready to send first chunk (4th conversational debounce)
+      if (this.conversationalDebounceCount >= 4) {
+        debugState("4TH DEBOUNCE TRIGGER", { debounceCount: this.conversationalDebounceCount });
+        this.sendChunkAtNaturalBreak("4th_conversational_debounce");
+        this.extendBaseline(rawContent);
+      }
+    }
+  }
+
+  handleCodeBoundary(conversationalContent, rawContent) {
+    // Add any conversational content before the code block
+    if (conversationalContent && conversationalContent.trim()) {
+      this.ttsAccumulator += (this.ttsAccumulator ? " " : "") + conversationalContent;
+      debugState("PRE-CODE ACCUMULATE", { 
+        addedContent: conversationalContent.substring(0, 50),
+        totalAccLen: this.ttsAccumulator.length 
+      });
+    }
+    
+    // Send accumulated content if we have any
+    if (this.ttsAccumulator.trim()) {
+      debugState("CODE BOUNDARY SEND", { accumulatorLen: this.ttsAccumulator.length });
+      this.sendChunkAtNaturalBreak("code_boundary");
+    }
+    
+    // Extend baseline to include everything (conversational + boundary)
+    this.extendBaseline(rawContent);
+  }
+
+  sendChunkAtNaturalBreak(reason) {
+    const chunkToSend = this.ttsAccumulator.trim();
+    if (!chunkToSend) return;
+
+    // Use a simple hash or just the text (if you're not worried about collisions)
+    const chunkHash = chunkToSend; // For short, unique chunks, this is fine
+
+    if (this.sentChunks.has(chunkHash)) {
+      debugState("SKIP DUPLICATE CHUNK", { reason, chunkHash });
+      return;
+    }
+    this.sentChunks.add(chunkHash);
+
+    // ...existing logic...
+    const chunkId = `raft-${this.currentRaft}`;
+    this.sendStreamChunk(chunkToSend, false, chunkId);
+
+    this.ttsAccumulator = "";
+    this.conversationalDebounceCount = 0;
+    this.currentRaft++;
+  }
+  extendBaseline(processedContent) {
+    const oldLen = this.baseline.length;
+    this.baseline += processedContent;
+    
+    debugState("EXTEND BASELINE", {
+      oldLen,
+      addedLen: processedContent.length,
+      newLen: this.baseline.length,
+      addedPreview: processedContent.substring(0, 50)
+    });
+  }
+
+  completeResponse() {
+    debugState("COMPLETE RESPONSE START", {
+      currentPhase: this.responsePhase,
+      remainingAccumulator: this.ttsAccumulator.length,
+      accumulatorContent: this.ttsAccumulator.substring(0, 100)
+    });
+    
+    // Send any remaining accumulated content
+    if (this.ttsAccumulator.trim()) {
+      this.sendChunkAtNaturalBreak("response_complete");
+    }
+    
+    // Set baseline to entire current response for next response
+    const element = this.findClaudeResponse();
+    if (element) {
+      const oldBaselineLen = this.baseline.length;
+      this.baseline = element.textContent || "";
+      
+      debugState("BASELINE SET TO FULL RESPONSE", {
+        oldLen: oldBaselineLen,
+        newLen: this.baseline.length,
+        difference: this.baseline.length - oldBaselineLen
+      });
+    }
+    
+    // Reset for next response
+    this.resetResponseState();
+    debugState("RESPONSE COMPLETE FINISHED", { phase: this.responsePhase });
+  }
+
+  // Server communication (unchanged)
   async sendStreamChunk(text, isComplete, responseId, retryAttempt = 0, isRetryOfFailed = false) {
     if (!text || text.trim().length === 0) {
       return { success: true, error: "Empty text, skipped" };
@@ -544,7 +451,6 @@ class ClaudeStreamMonitor {
 
     const MAX_RETRIES = 3;
     if (retryAttempt > MAX_RETRIES) {
-      console.error(`❌ Giving up after ${retryAttempt} retries for ${responseId}. Adding to failed queue.`);
       if (!isRetryOfFailed) {
         this.failedRequests.push({ text, isComplete, responseId, timestamp: Date.now() });
       }
@@ -564,19 +470,15 @@ class ClaudeStreamMonitor {
       if (result.success) {
         return result;
       } else {
-        console.warn(`⚠️ Server returned error for ${responseId} (Attempt ${retryAttempt}): ${result.error}. Retrying...`);
         await new Promise(resolve => setTimeout(resolve, (retryAttempt + 1) * 750));
         return this.sendStreamChunk(text, isComplete, responseId, retryAttempt + 1, isRetryOfFailed);
       }
     } catch (error) {
-      console.error(`❌ Failed to send chunk ${responseId} (Attempt ${retryAttempt}):`, error.message);
       this.serverHealthy = false;
       if (retryAttempt < MAX_RETRIES) {
-        console.log(`🔌 Connection error, retrying in ${(retryAttempt + 1) * 1000}ms... (attempt ${retryAttempt + 1})`);
         await new Promise(resolve => setTimeout(resolve, (retryAttempt + 1) * 1000));
         return this.sendStreamChunk(text, isComplete, responseId, retryAttempt + 1, isRetryOfFailed);
       } else {
-        console.error(`❌ Max retries for connection error on ${responseId}. Adding to failed queue.`);
         if (!isRetryOfFailed) {
           this.failedRequests.push({ text, isComplete, responseId, timestamp: Date.now() });
         }
@@ -587,15 +489,13 @@ class ClaudeStreamMonitor {
 
   async sendToServer(endpoint, data) {
     if (!this.serverHealthy && endpoint !== "/health" && endpoint !== "/reset_conversation") {
-      console.warn(`⚠️ Server appears to be down, not sending to ${endpoint}. Queuing if applicable.`);
-      if (endpoint === "/stream" && data && data.response_id && !this.failedRequests.find(fr => fr.responseId === data.response_id)) {
+      if (endpoint === "/stream" && data && data.response_id) {
         this.failedRequests.push({
           text: data.text,
           isComplete: data.is_complete,
           responseId: data.response_id,
           timestamp: data.timestamp || Date.now()
         });
-        console.log(`Queued failed request ${data.response_id} due to server health.`);
       }
       return { success: false, error: "Server is not responding" };
     }
@@ -616,32 +516,40 @@ class ClaudeStreamMonitor {
       try {
         result = await response.json();
       } catch (e) {
-        const textResponse = await response.text();
-        console.error(`❌ Server response not JSON for ${endpoint}: ${response.status}`, textResponse.substring(0, 500));
         this.serverHealthy = false;
-        return { success: false, error: `Server returned non-JSON response (status ${response.status})` };
+        return { success: false, error: `Non-JSON response (${response.status})` };
       }
 
       if (!response.ok) {
-        console.error(`❌ Server error: ${endpoint} (Status: ${response.status})`, result.error || result);
         if (response.status >= 500) this.serverHealthy = false;
-        return { success: false, error: result.error || `Server error status ${response.status}`, ...result };
+        return { success: false, error: result.error || `Server error ${response.status}` };
       }
       return result;
     } catch (error) {
       if (error.name === 'AbortError') {
-        console.error(`⏱️ Request timeout: ${endpoint}`);
         this.serverHealthy = false;
         return { success: false, error: "Request timeout" };
       }
-      console.error(`❌ Request failed: ${endpoint}`, error.message);
       this.serverHealthy = false;
       return { success: false, error: error.message };
     }
   }
 
+  async resetServerOnPageLoad() {
+    setTimeout(async () => {
+      try {
+        const result = await this.sendToServer("/reset_conversation", {
+          client_ip: 'browser',
+          response_id: 'page-refresh-' + Date.now()
+        });
+        if (result.success) console.log("🔄 Server state cleared");
+      } catch (error) { 
+        console.error("❌ Error resetting server:", error); 
+      }
+    }, 1000);
+  }
+
   async sendManualTTS(text) {
-    console.log(`📤 Manual TTS: ${text.substring(0, 50)}...`);
     const responseId = `manual-${Date.now()}`;
     const payload = {
       text: text,
@@ -652,7 +560,6 @@ class ClaudeStreamMonitor {
     };
 
     if (!this.serverHealthy) {
-      console.warn("Server down, queuing manual TTS request.");
       this.failedRequests.push({ ...payload });
       return { success: false, error: "Server down, request queued" };
     }
@@ -663,228 +570,125 @@ class ClaudeStreamMonitor {
 class TTSControlPanel {
   constructor(monitor) {
     this.monitor = monitor;
-    this.currentText = "";
     this.createPanel();
-    window.ttsPanel = this; // Make it accessible for loadSettings
+    window.ttsPanel = this;
   }
 
-  createPanel() { /* ... (as before) ... */
+  createPanel() {
     if (document.getElementById('claude-tts-controls')) return;
 
     const panel = document.createElement('div');
     panel.id = 'claude-tts-controls';
     panel.style.cssText = `
-      position: fixed; bottom: 20px; right: 20px; z-index: 9999;
-      background-color: #1C1C1C; color: white; padding: 16px;
-      border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.3);
-      display: flex; flex-direction: column; gap: 12px;
-      width: 320px;
+      position: fixed; top: 60px; right: 20px; z-index: 9999;
+      background-color: #1C1C1C; color: white; padding: 12px;
+      border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+      display: flex; align-items: center; gap: 8px;
       font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       border: 1px solid #333;
+      font-size: 14px;
     `;
 
+    // Compact title with original styling
     const title = document.createElement('div');
-    title.textContent = ' Claude-to-Speech ';
+    title.textContent = 'Claude-to-Speech';
     title.style.cssText = `
-      font-size: 36px; font-weight: 500; text-align: center; margin-bottom: 4px;
-      padding-bottom: 4px; border-bottom: 1px solid #D4A574;
-      font-family: 'Copernicus', serif; color: white; letter-spacing: 0.5px;
-      position: relative;
+      font-weight: 600; color: white; font-size: 14px;
+      font-family: 'Copernicus', serif; letter-spacing: 0.5px;
     `;
-
-    const lauraSignature = document.createElement('div');
-    lauraSignature.innerHTML = 'from LAURA with ♥';
-    lauraSignature.style.cssText = `
-      font-size: 10px; color: #666; position: absolute;
-      bottom: -14px; right: 4px;
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    `;
-    title.appendChild(lauraSignature);
     panel.appendChild(title);
 
-    const statusDiv = document.createElement('div');
-    statusDiv.id = 'status';
-    statusDiv.textContent = 'Ready';
-    statusDiv.style.cssText = `
-      font-size: 12px; color: #D4A574; text-align: center; margin-top: 4px;
-      font-weight: 500;
+    // Server health indicator
+    const healthIndicator = document.createElement('div');
+    healthIndicator.id = 'health-indicator';
+    healthIndicator.style.cssText = `
+      width: 8px; height: 8px; border-radius: 50%;
+      background-color: #86E0A2; margin: 0 4px;
     `;
-    panel.appendChild(statusDiv);
+    panel.appendChild(healthIndicator);
 
-    const lockDiv = document.createElement('div');
-    lockDiv.id = 'processing-lock';
-    lockDiv.style.cssText = `
-      font-size: 10px; color: #666; text-align: center; margin-top: 2px;
-      display: none;
+    // Conversation mode toggle (no text)
+    const toggleSwitch = document.createElement('div');
+    this.toggleSwitchElement = toggleSwitch;
+    toggleSwitch.style.cssText = `
+      width: 36px; height: 20px; background-color: #555; border-radius: 10px;
+      position: relative; cursor: pointer; transition: background-color 0.3s;
     `;
-    panel.appendChild(lockDiv);
-
-    const serverStatus = document.createElement('div');
-    serverStatus.id = 'server-status';
-    serverStatus.style.cssText = `
-      font-size: 10px; color: #666; text-align: center; margin-top: 2px;
+    const toggleKnob = document.createElement('div');
+    this.toggleKnobElement = toggleKnob;
+    toggleKnob.style.cssText = `
+      width: 16px; height: 16px; background-color: white; border-radius: 50%;
+      position: absolute; top: 2px; left: 2px; transition: transform 0.3s;
     `;
-    serverStatus.textContent = 'Checking server status...';
-    panel.appendChild(serverStatus);
+    toggleSwitch.appendChild(toggleKnob);
+    
+    this.updateToggleVisuals(this.monitor.conversationMode);
 
-    this.addConversationModeToggle(panel);
+    toggleSwitch.onclick = () => {
+      const newMode = !this.monitor.conversationMode;
+      chrome.storage.local.set({ conversationMode: newMode }, () => {
+        this.monitor.conversationMode = newMode; 
+        this.updateToggleVisuals(newMode);
 
+        if (newMode) {
+          if (!this.monitor.isMonitoring) {
+            this.monitor.startMonitoring();
+          }
+        } else {
+          if (this.monitor.isMonitoring) {
+            this.monitor.stopMonitoring();
+          }
+        }
+      });
+    };
+    panel.appendChild(toggleSwitch);
+
+    // Detect button
     const detectBtn = document.createElement('button');
-    detectBtn.textContent = 'Detect Claude Response';
+    detectBtn.textContent = 'Detect';
     detectBtn.style.cssText = `
-      background-color: #333333; color: white; border: none; border-radius: 8px;
-      padding: 12px 16px; cursor: pointer; font-size: 14px; font-weight: 600;
-      transition: all 0.2s ease; margin-top: 4px;
+      background-color: #333333; color: white; border: none; border-radius: 6px;
+      padding: 6px 12px; cursor: pointer; font-size: 12px; font-weight: 500;
+      transition: background-color 0.2s;
     `;
-    detectBtn.onmouseover = () => {
-      detectBtn.style.backgroundColor = '#404040';
-      detectBtn.style.transform = 'translateY(-1px)';
-    };
-    detectBtn.onmouseout = () => {
-      detectBtn.style.backgroundColor = '#333333';
-      detectBtn.style.transform = 'translateY(0)';
-    };
-    detectBtn.onclick = () => this.detectAndDisplay();
+    detectBtn.onmouseover = () => detectBtn.style.backgroundColor = '#404040';
+    detectBtn.onmouseout = () => detectBtn.style.backgroundColor = '#333333';
+    detectBtn.onclick = () => this.monitor.resetForNewResponse();
     panel.appendChild(detectBtn);
 
-    const previewArea = document.createElement('div');
-    previewArea.style.cssText = `
-      margin-top: 4px; border: 1px solid #D4A574; border-radius: 8px;
-      background-color: #1F2020; padding: 12px;
-    `;
-
-    const previewLabel = document.createElement('div');
-    previewLabel.textContent = 'Detected Text Preview:';
-    previewLabel.style.cssText = `
-      font-size: 12px; margin-bottom: 8px; color: #D4A574; font-weight: 500;
-    `;
-
-    const previewText = document.createElement('div');
-    previewText.id = 'text-preview';
-    previewText.style.cssText = `
-      max-height: 120px; overflow-y: auto; font-size: 13px;
-      white-space: pre-wrap; word-break: break-word;
-      font-family: 'SF Mono', Monaco, Consolas, monospace;
-      padding: 10px; background-color: #2A2A2A; border-radius: 6px;
-      color: #F5E6D3; line-height: 1.4;
-    `;
-    previewArea.appendChild(previewLabel);
-    previewArea.appendChild(previewText);
-    panel.appendChild(previewArea);
     document.body.appendChild(panel);
     this.updateStatusDisplay();
   }
 
-  addConversationModeToggle(panel) {
-    const toggleContainer = document.createElement('div');
-    toggleContainer.style.cssText = `
-        display: flex; align-items: center; justify-content: space-between;
-        background-color: #2A2A2A; padding: 10px; border-radius: 8px;
-    `;
-
-    const label = document.createElement('label');
-    label.textContent = 'Conversation Mode:';
-    label.style.cssText = `font-size: 14px; color: #D4A574; font-weight: 500;`;
-
-    const toggleSwitch = document.createElement('div');
-    this.toggleSwitchElement = toggleSwitch; // Store for updateToggleVisuals
-    toggleSwitch.style.cssText = `
-        width: 44px; height: 24px; background-color: #555; border-radius: 12px;
-        position: relative; cursor: pointer; transition: background-color 0.3s;
-    `;
-    const toggleKnob = document.createElement('div');
-    this.toggleKnobElement = toggleKnob; // Store for updateToggleVisuals
-    toggleKnob.style.cssText = `
-        width: 20px; height: 20px; background-color: white; border-radius: 50%;
-        position: absolute; top: 2px; left: 2px; transition: transform 0.3s;
-    `;
-    toggleSwitch.appendChild(toggleKnob);
-    
-    this.updateToggleVisuals(this.monitor.conversationMode); // Initial visual state
-
-    toggleSwitch.onclick = () => {
-        const newMode = !this.monitor.conversationMode;
-        chrome.storage.local.set({ conversationMode: newMode }, () => {
-            // Ensure monitor's state is updated AFTER storage commits, then act.
-            this.monitor.conversationMode = newMode; 
-            this.updateToggleVisuals(newMode);
-            this.updateStatusDisplay();
-
-            if (newMode) { // Enabling
-                if (!this.monitor.isMonitoring) {
-                    this.monitor.startMonitoring();
-                }
-            } else { // Disabling
-                if (this.monitor.isMonitoring) {
-                    this.monitor.stopMonitoringAndFinalize();
-                }
-            }
-        });
-    };
-
-    toggleContainer.appendChild(label);
-    toggleContainer.appendChild(toggleSwitch);
-    panel.appendChild(toggleContainer);
-  }
-
   updateToggleVisuals(isActive) {
     if (this.toggleSwitchElement && this.toggleKnobElement) {
-        if (isActive) {
-            this.toggleSwitchElement.style.backgroundColor = '#D4A574'; 
-            this.toggleKnobElement.style.transform = 'translateX(20px)';
-        } else {
-            this.toggleSwitchElement.style.backgroundColor = '#555'; 
-            this.toggleKnobElement.style.transform = 'translateX(0px)';
-        }
+      if (isActive) {
+        this.toggleSwitchElement.style.backgroundColor = '#D4A574'; 
+        this.toggleKnobElement.style.transform = 'translateX(16px)';
+      } else {
+        this.toggleSwitchElement.style.backgroundColor = '#555'; 
+        this.toggleKnobElement.style.transform = 'translateX(0px)';
+      }
     }
   }
 
-
-  detectAndDisplay() {
-    this.monitor.resetForNewResponse(); 
-    const responseElement = this.monitor.findClaudeResponse();
-    const textPreview = document.getElementById('text-preview');
-
-    if (responseElement) {
-        this.currentText = responseElement.textContent || ""; 
-        textPreview.textContent = this.currentText.substring(0, 500) + (this.currentText.length > 500 ? "..." : "");
-        document.getElementById('status').textContent = 'Response detected.';
-        this.monitor.currentResponseElement = responseElement; 
-        this.monitor.processStreamUpdate(); 
-    } else {
-        textPreview.textContent = 'No Claude response found.';
-        document.getElementById('status').textContent = 'No response found.';
-        this.currentText = "";
+  updateStatusDisplay() {
+    const healthIndicator = document.getElementById('health-indicator');
+    if (healthIndicator) {
+      healthIndicator.style.backgroundColor = this.monitor.serverHealthy ? '#86E0A2' : '#E07A7A';
     }
-  }
-
-  updateStatusDisplay() { /* ... (as before) ... */
-    const statusDiv = document.getElementById('status');
-    const lockDiv = document.getElementById('processing-lock');
-    const serverStatusDiv = document.getElementById('server-status');
-
-    if (!statusDiv || !lockDiv || !serverStatusDiv) return;
-
-    statusDiv.textContent = this.monitor.conversationMode ? '🎤 Streaming Active' : '🎧 Streaming Paused';
-    statusDiv.style.color = this.monitor.conversationMode ? '#86E0A2' : '#D4A574';
-
-    lockDiv.style.display = this.monitor.processingLock ? 'block' : 'none';
-    lockDiv.textContent = this.monitor.processingLock ? '⚙️ Processing...' : '';
-
-    serverStatusDiv.textContent = this.monitor.serverHealthy ? '✅ Server OK' : '❌ Server Issue';
-    serverStatusDiv.style.color = this.monitor.serverHealthy ? '#86E0A2' : '#E07A7A';
   }
 
   initPeriodicUpdates() {
     setInterval(() => {
-        this.updateStatusDisplay();
+      this.updateStatusDisplay();
     }, 1000);
   }
 }
 
 // Global instantiation
 if (typeof claudeStreamMonitor === 'undefined' || !claudeStreamMonitor) {
-  var claudeStreamMonitor = new ClaudeStreamMonitor(); // Constructor now calls loadSettings
-  var ttsPanel = new TTSControlPanel(claudeStreamMonitor); // Panel created, constructor calls its updateToggleVisuals
+  var claudeStreamMonitor = new ClaudeStreamMonitor();
+  var ttsPanel = new TTSControlPanel(claudeStreamMonitor);
   ttsPanel.initPeriodicUpdates();
 }
