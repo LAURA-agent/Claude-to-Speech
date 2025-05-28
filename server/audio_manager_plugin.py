@@ -132,6 +132,15 @@ class AudioManager:
         """Check if the audio manager has been successfully initialized."""
         return self._initialized
 
+    async def hard_reset(self):
+        await self.stop_current_audio()
+        await self.stop_audio_queue()
+        await self.clear_queue()
+        self.state = AudioManagerState()
+        self.processed_response_ids.clear()
+        if not self.is_processing_queue:
+            self.queue_processor_task = asyncio.create_task(self.process_audio_queue())
+
     async def queue_audio(self, audio_file: Optional[str] = None, generated_text: Optional[str] = None, delete_after_play: bool = False):
         if not self._initialized:
             print("AudioManager is not initialized. Cannot queue audio.")
