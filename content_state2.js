@@ -1,5 +1,10 @@
-// Claude TTS Stream Monitor - Content-Aware State Management
-console.log("🚀 Claude TTS Stream Monitor - Content-Aware Version");
+// Claude TTS Stream Monitor - Content-Aware State Management with Debug Framework
+console.log("🚀 Claude TTS Stream Monitor - Content-Aware Version with Debug");
+
+// Debug Framework
+function debugState(label, state) {
+  console.log(`[TTS-DEBUG] ${label}:`, JSON.parse(JSON.stringify(state)));
+}
 
 class ClaudeStreamMonitor {
   constructor() {
@@ -143,11 +148,23 @@ class ClaudeStreamMonitor {
   }
 
   resetResponseState() {
+    debugState("RESET RESPONSE STATE", {
+      oldPhase: this.responsePhase,
+      oldAccLen: this.ttsAccumulator.length,
+      oldDebounceCount: this.conversationalDebounceCount,
+      oldRaft: this.currentRaft
+    });
+    
     this.ttsAccumulator = "";
     this.conversationalDebounceCount = 0;
     this.currentRaft = 1;
     this.responsePhase = 'IDLE';
-    console.log("🔄 Response state reset");
+    
+    debugState("STATE RESET COMPLETE", {
+      phase: this.responsePhase,
+      raft: this.currentRaft,
+      debounceCount: this.conversationalDebounceCount
+    });
   }
 
   resetForNewResponse() {
@@ -229,6 +246,7 @@ class ClaudeStreamMonitor {
     try {
       const element = this.findClaudeResponse();
       if (!element) {
+        debugState("NO ELEMENT FOUND", { elementExists: false });
         this.processingLock = false;
         return;
       }
@@ -239,22 +257,38 @@ class ClaudeStreamMonitor {
       let newRawContent = "";
       if (currentRawContent.startsWith(this.baseline)) {
         newRawContent = currentRawContent.substring(this.baseline.length);
+        debugState("BASELINE MATCH", { 
+          baselineLen: this.baseline.length, 
+          currentLen: currentRawContent.length,
+          newContentLen: newRawContent.length 
+        });
       } else {
         // Content structure changed - reset and process all
-        console.log("📝 Content structure changed - full reprocess");
+        debugState("BASELINE MISMATCH - RESET", { 
+          baselineStart: this.baseline.substring(0, 100),
+          currentStart: currentRawContent.substring(0, 100),
+          baselineLen: this.baseline.length,
+          currentLen: currentRawContent.length
+        });
         this.baseline = "";
         this.resetResponseState();
         newRawContent = currentRawContent;
       }
 
       if (!newRawContent.trim()) {
+        debugState("NO NEW CONTENT", { newContentLen: newRawContent.length });
         this.processingLock = false;
         return;
       }
 
       // Classify the new content
       const classification = this.classifyContent(newRawContent, element);
-      console.log(`📝 Content type: ${classification.type}, length: ${newRawContent.length}`);
+      debugState(`CLASSIFY [${classification.type}]`, { 
+        newRawContentLen: newRawContent.length,
+        cleanContentLen: classification.cleanContent.length,
+        contentPreview: newRawContent.substring(0, 100),
+        cleanPreview: classification.cleanContent.substring(0, 100)
+      });
 
       // Handle based on content type and current phase
       this.handleContentByType(classification, newRawContent);
@@ -262,11 +296,12 @@ class ClaudeStreamMonitor {
       // Reset completion timer
       clearTimeout(this.completionTimer);
       this.completionTimer = setTimeout(() => {
+        debugState("COMPLETION TIMER FIRED", { phase: this.responsePhase });
         this.completeResponse();
       }, 2000);
 
     } catch (error) {
-      console.error("❌ Processing error:", error);
+      debugState("PROCESSING ERROR", { error: error.message, stack: error.stack });
       this.responsePhase = 'IDLE';
     } finally {
       this.processingLock = false;
@@ -276,21 +311,24 @@ class ClaudeStreamMonitor {
   handleContentByType(classification, rawContent) {
     switch (classification.type) {
       case 'thinking':
-        console.log("🧠 Thinking phase detected");
+        debugState("PHASE TRANSITION", { from: this.responsePhase, to: 'THINKING' });
         this.responsePhase = 'THINKING';
         this.extendBaseline(rawContent);
         break;
         
       case 'conversational':
         if (this.responsePhase === 'THINKING' || this.responsePhase === 'IDLE') {
-          console.log("💬 Conversational phase started");
+          debugState("PHASE TRANSITION", { from: this.responsePhase, to: 'RESPONDING' });
           this.responsePhase = 'RESPONDING';
         }
         this.handleConversationalContent(classification.cleanContent, rawContent);
         break;
         
       case 'code':
-        console.log("🚧 Code boundary detected");
+        debugState("CODE BOUNDARY DETECTED", { 
+          cleanContentLen: classification.cleanContent.length,
+          currentAccumulator: this.ttsAccumulator.length 
+        });
         this.handleCodeBoundary(classification.cleanContent, rawContent);
         break;
     }
@@ -298,15 +336,23 @@ class ClaudeStreamMonitor {
 
   handleConversationalContent(cleanContent, rawContent) {
     if (cleanContent && cleanContent.trim()) {
+      const oldAccumulator = this.ttsAccumulator;
       // Add to accumulator
       this.ttsAccumulator += (this.ttsAccumulator ? " " : "") + cleanContent;
       
       // Increment conversational debounce count
       this.conversationalDebounceCount++;
-      console.log(`💬 Conversational debounce: ${this.conversationalDebounceCount}, accumulator: ${this.ttsAccumulator.length} chars`);
+      
+      debugState("ACCUMULATE CONVERSATIONAL", {
+        debounceCount: this.conversationalDebounceCount,
+        oldAccLen: oldAccumulator.length,
+        newAccLen: this.ttsAccumulator.length,
+        addedContent: cleanContent.substring(0, 50)
+      });
       
       // Check if ready to send first chunk (4th conversational debounce)
       if (this.conversationalDebounceCount >= 4) {
+        debugState("4TH DEBOUNCE TRIGGER", { debounceCount: this.conversationalDebounceCount });
         this.sendChunkAtNaturalBreak("4th_conversational_debounce");
         this.extendBaseline(rawContent);
       }
@@ -317,10 +363,15 @@ class ClaudeStreamMonitor {
     // Add any conversational content before the code block
     if (conversationalContent && conversationalContent.trim()) {
       this.ttsAccumulator += (this.ttsAccumulator ? " " : "") + conversationalContent;
+      debugState("PRE-CODE ACCUMULATE", { 
+        addedContent: conversationalContent.substring(0, 50),
+        totalAccLen: this.ttsAccumulator.length 
+      });
     }
     
     // Send accumulated content if we have any
     if (this.ttsAccumulator.trim()) {
+      debugState("CODE BOUNDARY SEND", { accumulatorLen: this.ttsAccumulator.length });
       this.sendChunkAtNaturalBreak("code_boundary");
     }
     
@@ -329,7 +380,10 @@ class ClaudeStreamMonitor {
   }
 
   sendChunkAtNaturalBreak(reason) {
-    if (!this.ttsAccumulator.trim()) return;
+    if (!this.ttsAccumulator.trim()) {
+      debugState("SKIP EMPTY CHUNK", { reason, accumulatorLen: this.ttsAccumulator.length });
+      return;
+    }
     
     // Find natural break point - prefer paragraph breaks, fallback to sentences
     let contentToSend = this.ttsAccumulator;
@@ -340,14 +394,28 @@ class ClaudeStreamMonitor {
       this.ttsAccumulator.lastIndexOf('? ')
     );
     
+    let breakType = "full_content";
     if (lastParagraphBreak > 0) {
       contentToSend = this.ttsAccumulator.substring(0, lastParagraphBreak + 2);
+      breakType = "paragraph_break";
     } else if (lastSentenceEnd > 0) {
       contentToSend = this.ttsAccumulator.substring(0, lastSentenceEnd + 2);
+      breakType = "sentence_break";
     }
     
     // Send to TTS
     const chunkId = `raft-${this.currentRaft}`;
+    
+    debugState("SEND CHUNK", {
+      reason,
+      chunkId,
+      breakType,
+      contentLen: contentToSend.length,
+      totalAccLen: this.ttsAccumulator.length,
+      contentPreview: contentToSend.substring(0, 100),
+      raftNumber: this.currentRaft
+    });
+    
     console.log(`🚢 RAFT ${this.currentRaft} (${reason}): ${contentToSend.length} chars`);
     this.sendStreamChunk(contentToSend, false, chunkId);
     
@@ -355,15 +423,32 @@ class ClaudeStreamMonitor {
     this.ttsAccumulator = "";
     this.conversationalDebounceCount = 0;
     this.currentRaft++;
+    
+    debugState("POST-SEND STATE", {
+      clearedAccumulator: true,
+      resetDebounceCount: true,
+      newRaftNumber: this.currentRaft
+    });
   }
 
   extendBaseline(processedContent) {
+    const oldLen = this.baseline.length;
     this.baseline += processedContent;
-    console.log(`📸 Baseline extended: +${processedContent.length} chars (total: ${this.baseline.length})`);
+    
+    debugState("EXTEND BASELINE", {
+      oldLen,
+      addedLen: processedContent.length,
+      newLen: this.baseline.length,
+      addedPreview: processedContent.substring(0, 50)
+    });
   }
 
   completeResponse() {
-    console.log("⏰ Completing response");
+    debugState("COMPLETE RESPONSE START", {
+      currentPhase: this.responsePhase,
+      remainingAccumulator: this.ttsAccumulator.length,
+      accumulatorContent: this.ttsAccumulator.substring(0, 100)
+    });
     
     // Send any remaining accumulated content
     if (this.ttsAccumulator.trim()) {
@@ -373,12 +458,19 @@ class ClaudeStreamMonitor {
     // Set baseline to entire current response for next response
     const element = this.findClaudeResponse();
     if (element) {
+      const oldBaselineLen = this.baseline.length;
       this.baseline = element.textContent || "";
-      console.log("📸 Response complete - baseline set to full response");
+      
+      debugState("BASELINE SET TO FULL RESPONSE", {
+        oldLen: oldBaselineLen,
+        newLen: this.baseline.length,
+        difference: this.baseline.length - oldBaselineLen
+      });
     }
     
     // Reset for next response
     this.resetResponseState();
+    debugState("RESPONSE COMPLETE FINISHED", { phase: this.responsePhase });
   }
 
   // Server communication (unchanged)
