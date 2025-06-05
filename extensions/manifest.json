@@ -16,7 +16,7 @@
       "matches": ["https://*.claude.ai/*"],
       "js": [
         "config/extension_config.js",
-        "content_v3_12.js"
+        "content.js"
       ]
     }
   ],
