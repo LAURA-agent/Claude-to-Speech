@@ -1,135 +1,173 @@
+# smart_streaming_processor.py
 import asyncio
 import time
 import logging
-from typing import List, Optional, Dict, Tuple
-from dataclasses import dataclass
-import hashlib
+import re
+from typing import Optional
+from difflib import SequenceMatcher
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("tts_server.log", mode='a'),
-        logging.StreamHandler()
-    ]
-)
+# Configure logging
 logger = logging.getLogger(__name__)
+# Basic config if not configured by main server script
+if not logger.handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler("tts_server.log", mode='a'),
+            logging.StreamHandler()
+        ]
+    )
 
-@dataclass
-class TextChunk:
-    content: str
-    response_id: str
-    is_complete: bool
-    timestamp: float
-
-class StreamingTTSHandler:
+class SimplifiedTTSProcessor:
     """
-    Handles streaming TTS chunks, deduplication, and chunk sequencing.
-    Deduplication is by (base_id, content_hash), so reused chunk labels don't cause missed content.
+    A simplified processor that takes text chunks (one-shot or full response) from the client,
+    handles deduplication, and queues them for TTS.
     """
     def __init__(self, audio_manager):
         self.audio_manager = audio_manager
-        # Deduplicate by (base_id, content_hash) for each parent response
-        self.processed_chunks = set()
-        self.response_chunks: Dict[str, List[TextChunk]] = {}
-        self.cleanup_tasks: Dict[str, asyncio.Task] = {}
+        # Store raw one-shot text per base response ID for delta calculation
+        self.oneshot_raw_texts = {}  # {base_response_id: raw_oneshot_text}
+        logger.info("SimplifiedTTSProcessor initialized.")
 
-    def _hash_content(self, text: str) -> str:
-        return hashlib.sha256(text.encode('utf-8')).hexdigest()
-
-    def _parse_response_id(self, response_id: str) -> str:
+    def _clean_text_for_tts(self, text_from_client: str) -> str:
         """
-        Extract a base_id from a response_id like 'resp-abcdef-raft-2' or just 'raft-1'.
-        If the id has dashes, drop the trailing dash/number. Otherwise use as is.
+        Light cleaning for TTS - client has already done heavy lifting for full responses
         """
-        if not response_id:
-            return f"unknown-{int(time.time())}"
-        parts = response_id.rsplit('-', 1)
-        # If the last part is numeric, treat what's before as base
-        if len(parts) == 2 and parts[1].isdigit():
-            return parts[0]
-        return response_id
+        if not text_from_client:
+            return ""
+        
+        cleaned_text = text_from_client.strip()
+        
+        # Just handle basic formatting for TTS
+        # Replace double newlines with periods
+        cleaned_text = cleaned_text.replace('\n\n', '. ')
+        # Replace single newlines with spaces
+        cleaned_text = cleaned_text.replace('\n', ' ')
+        # Collapse multiple spaces
+        cleaned_text = re.sub(r'\s+', ' ', cleaned_text)
+        # Remove empty parentheses
+        cleaned_text = re.sub(r'\(\s*\)', '', cleaned_text)
+        
+        return cleaned_text.strip()
 
-    async def process_stream_chunk(self, text: str, is_complete: bool = False, response_id: str = None):
-        base_id = self._parse_response_id(response_id)
-        content_hash = self._hash_content(text.strip())
-        chunk_key = (base_id, content_hash)
+    def _get_base_response_id(self, full_response_id: str) -> str:
+        """
+        Extracts the base part of the response ID.
+        e.g., "claude-resp-XYZ-oneshot" -> "claude-resp-XYZ"
+        e.g., "claude-resp-XYZ-complete" -> "claude-resp-XYZ"
+        """
+        parts = full_response_id.split('-')
+        known_suffixes = ["oneshot", "delta", "complete", "full", "finalized", "stop"]
+        
+        if len(parts) > 2 and parts[-1] in known_suffixes:
+            # Handle compound suffixes like "oneshot-finalized"
+            if len(parts) > 3 and parts[-2] in known_suffixes:
+                return '-'.join(parts[:-2])
+            return '-'.join(parts[:-1])
+        return full_response_id
 
-        if chunk_key in self.processed_chunks:
-            logger.warning(f"⚠️ Skipping duplicate chunk for base_id: {base_id} (hash: {content_hash[:8]})")
+    def _normalize_for_comparison(self, text: str) -> str:
+        """Normalize text for comparison by removing formatting differences"""
+        if not text:
+            return ""
+        
+        # Remove all newlines and extra spaces (like DOM cleaning does)
+        normalized = re.sub(r'\s+', ' ', text)
+        
+        # Strip quotes and whitespace
+        normalized = normalized.strip().lstrip('"\'`')
+        
+        # Remove common DOM artifacts
+        normalized = re.sub(r'\s*\.\s*$', '', normalized)  # Remove trailing periods
+        normalized = re.sub(r'\s+', ' ', normalized)  # Collapse spaces again
+        
+        return normalized.strip()
+
+    async def process_chunk(self, text_content: str, full_response_id: str, is_complete: bool):
+        """
+        Processes a text chunk received from the client.
+        """
+        if not self.audio_manager:
+            logger.error(f"Audio manager not available. Cannot process chunk for {full_response_id}.")
             return
 
-        logger.info(f"📥 Processing chunk [{response_id}]: {len(text)} chars, base_id: {base_id}, hash: {content_hash[:8]}, complete: {is_complete}")
-        self.processed_chunks.add(chunk_key)
-        chunk = TextChunk(
-            content=text.strip(),
-            response_id=response_id,
-            is_complete=is_complete,
-            timestamp=time.time()
-        )
+        logger.info(f"Received chunk for {full_response_id}: '{text_content[:75]}...', complete: {is_complete}")
 
-        # Track all chunks for this base_id
-        if base_id not in self.response_chunks:
-            self.response_chunks[base_id] = []
-            logger.info(f"🆕 Starting new response stream: {base_id}")
+        base_id = self._get_base_response_id(full_response_id)
 
-        self.response_chunks[base_id].append(chunk)
-
-        try:
-            if chunk.content and len(chunk.content) > 5:
-                logger.info(f"🔊 Sending to TTS: {chunk.content[:80]}...")
-                await self.audio_manager.queue_audio(
-                    generated_text=chunk.content,
-                    delete_after_play=True,
-                )
-                logger.info(f"✅ TTS queued for {response_id}")
+        if not is_complete and "oneshot" in full_response_id:
+            # This is the raw one-shot - store it and queue for TTS
+            self.oneshot_raw_texts[base_id] = text_content
+            logger.info(f"Storing raw one-shot for {base_id}: '{text_content[:50]}...'")
+            
+            # Clean and queue the one-shot
+            cleaned_oneshot = self._clean_text_for_tts(text_content)
+            if cleaned_oneshot:
+                await self._queue_for_tts(cleaned_oneshot, full_response_id)
+            
+        elif is_complete:
+            # This is the DOM-cleaned full response
+            text_to_process = text_content
+            
+            # Check if we have a one-shot to deduplicate
+            if base_id in self.oneshot_raw_texts:
+                stored_oneshot = self.oneshot_raw_texts[base_id]
+                
+                # Use fuzzy matching to find where one-shot appears in full text
+                from difflib import SequenceMatcher
+                s = SequenceMatcher(None, stored_oneshot.lower(), text_content.lower())
+                match = s.find_longest_match(0, len(stored_oneshot), 0, len(text_content))
+                
+                # If we find a good match (>80% of one-shot length)
+                if match.size > len(stored_oneshot) * 0.8:
+                    # Remove the matched portion from the full text
+                    delta_text = text_content[match.b + match.size:].strip()
+                    
+                    if delta_text:
+                        logger.info(f"Found one-shot match at position {match.b}, removing {match.size} chars")
+                        text_to_process = delta_text
+                    else:
+                        logger.info(f"No delta after removing one-shot")
+                        del self.oneshot_raw_texts[base_id]
+                        return
+                else:
+                    logger.info(f"One-shot not found via fuzzy match (best match: {match.size}/{len(stored_oneshot)} chars), processing full text")
+                
+                # Clean up stored one-shot
+                del self.oneshot_raw_texts[base_id]
             else:
-                logger.warning(f"⚠️ Skipping empty/short chunk: {response_id}")
+                # No one-shot stored - process the full text
+                logger.info(f"No one-shot found for {base_id}. Processing full text.")
+            
+            # Clean and queue whatever we decided to process
+            cleaned_text = self._clean_text_for_tts(text_to_process)
+            if cleaned_text:
+                await self._queue_for_tts(cleaned_text, full_response_id)
+
+    async def _queue_for_tts(self, text: str, response_id: str):
+        """Helper to queue text for TTS"""
+        try:
+            await self.audio_manager.queue_audio(generated_text=text, delete_after_play=True)
+            logger.info(f"Queued for TTS (ID: {response_id}): '{text[:75]}...'")
         except Exception as e:
-            logger.error(f"❌ TTS error for {response_id}: {e}", exc_info=True)
-            self.processed_chunks.discard(chunk_key) # Allow retry if TTS fails
+            logger.error(f"Error queuing audio for {response_id}: {e}", exc_info=True)
 
-        if is_complete:
-            await self._finalize_response(base_id)
+    async def reset_conversation(self, response_id: Optional[str] = None):
+        """
+        Resets the state for a new conversation or on client request.
+        """
+        context = f" (context: {response_id})" if response_id else ""
+        logger.info(f"Resetting conversation state{context}")
+        
+        # Clear stored one-shots
+        self.oneshot_raw_texts.clear()
 
-    async def _finalize_response(self, base_id: str):
-        """Called when a response stream is marked complete."""
-        if base_id not in self.response_chunks:
-            return
-        chunks = self.response_chunks[base_id]
-        total_chars = sum(len(chunk.content) for chunk in chunks)
-        logger.info(f"🏁 Response {base_id} complete: {len(chunks)} chunks, {total_chars} total characters")
-        # Schedule cleanup of state for this response after a timeout
-        if base_id in self.cleanup_tasks:
-            self.cleanup_tasks[base_id].cancel()
-        self.cleanup_tasks[base_id] = asyncio.create_task(self._cleanup_response(base_id, delay=300))
-
-    async def _cleanup_response(self, base_id: str, delay: int = 300):
-        """Cleans up state for a finished response after delay (default 5 min)."""
-        await asyncio.sleep(delay)
-        removed = 0
-        # Remove processed_chunks associated with this base_id
-        for chunk in self.response_chunks.get(base_id, []):
-            content_hash = self._hash_content(chunk.content)
-            chunk_key = (base_id, content_hash)
-            if chunk_key in self.processed_chunks:
-                self.processed_chunks.discard(chunk_key)
-                removed += 1
-        if base_id in self.response_chunks:
-            chunk_count = len(self.response_chunks[base_id])
-            del self.response_chunks[base_id]
-        else:
-            chunk_count = 0
-        logger.debug(f"🧹 Cleaned up response {base_id} ({chunk_count} chunks, {removed} dedupe keys)")
-
-    async def reset_conversation(self, response_id: str = None):
-        logger.info(f"🔄 Reset conversation requested (context: {response_id})")
-        self.processed_chunks.clear()
-        self.response_chunks.clear()
-        for task in self.cleanup_tasks.values():
-            task.cancel()
-        self.cleanup_tasks.clear()
         if self.audio_manager:
             await self.audio_manager.clear_queue()
             await self.audio_manager.stop_current_audio()
-        logger.info(f"✅ Conversation reset complete (context: {response_id})")
+            logger.info(f"Audio manager queue cleared and audio stopped during reset{context}.")
+        else:
+            logger.warning(f"Audio manager not available during reset_conversation{context}.")
+        
+        logger.info(f"Conversation reset complete{context}.")
