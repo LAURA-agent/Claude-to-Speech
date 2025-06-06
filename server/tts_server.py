@@ -79,31 +79,33 @@ async def stream_text():
         text = data.get('text', '')
         is_complete = data.get('is_complete', False)
         response_id = data.get('response_id', f'stream-{int(time.time())}')
+        source = data.get('source', 'claude')  # NEW: Track where this came from
 
-        # The client now sends either a one-shot or a delta.
-        # The server just processes what it receives.
-        logger.info(f"📥 Received stream chunk for [{response_id}]: {len(text)} chars, complete: {is_complete}")
+        # Log differently based on source
+        if source == 'gemini':
+            logger.info(f"🎭 Received ArgoVox chunk for [{response_id}]: {len(text)} chars, complete: {is_complete}")
+        else:
+            logger.info(f"📥 Received Claude chunk for [{response_id}]: {len(text)} chars, complete: {is_complete}")
         
+        # Process the chunk normally - your existing processor handles everything
         await tts_processor.process_chunk(
             text_content=text,
             full_response_id=response_id,
             is_complete=is_complete
         )
         
-        # If this chunk is marked as complete, optionally wait for audio queue.
-        # This helps ensure audio for this response has a chance to finish before client might send another.
+        # If this chunk is marked as complete, wait for audio processing
         if is_complete and audio_manager:
-            logger.info(f"Final chunk for {response_id}. Waiting for audio queue to process and play (timeout 30s).")
-            # Wait for the queue to be joined (i.e., the item processed)
+            logger.info(f"Final chunk for {response_id}. Waiting for audio queue to process...")
             await audio_manager.wait_for_queue_empty(timeout=30.0) 
-            # Then, ensure playback itself has a moment or completes
-            await audio_manager.wait_for_audio_completion(timeout=5.0) # Shorter timeout here might be okay
-            logger.info(f"Audio queue/completion wait finished for {response_id}.")
+            await audio_manager.wait_for_audio_completion(timeout=5.0)
+            logger.info(f"Audio completion wait finished for {response_id}.")
 
         return jsonify({
             "success": True,
             "processed": True,
-            "response_id": response_id
+            "response_id": response_id,
+            "source": source  # Echo back so client knows we got it
         })
 
     except asyncio.TimeoutError:
