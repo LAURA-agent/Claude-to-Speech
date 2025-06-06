@@ -1,110 +1,130 @@
 # Claude-to-Speech
 
-A Chrome extension that converts Claude AI's text responses to speech using ElevenLabs' text-to-speech API.
+A high-performance Chrome extension that provides real-time text-to-speech for Claude AI conversations, featuring innovative one-shot streaming to minimize latency between Claude's response generation and audio playback.
 
 ## Overview
 
-Claude-to-Speech adds a floating control panel to Claude's web interface, allowing you to:
+Claude-to-Speech enhances the Claude.ai interface with a seamless TTS experience that begins speaking responses almost immediately as Claude starts generating them. Built with a focus on performance and reliability, it's been extensively tested on resource-constrained devices including Raspberry Pi.
 
-- Detect Claude's responses automatically
-- Convert responses to speech with a single click
-- Enable "Conversation Mode" to automatically speak Claude's responses
-- Process responses in real-time with streaming support
+## Key Features
 
-## Features
+- **One-Shot Streaming**: Captures and speaks the first line of Claude's response in real-time, reducing perceived latency
+- **Intelligent Deduplication**: Server-side fuzzy matching prevents duplicate audio playback
+- **DOM-Aware Processing**: Cleanly extracts text while removing code blocks, UI elements, and artifacts
+- **Gradio Web Interface**: Monitor and control TTS queue, playback, and system health at `http://localhost:7860`
+- **Configuration Manager**: Full settings control via web UI at `http://localhost:5001`
+- **Resilient Architecture**: Automatic retry for failed requests and health monitoring
+- **Performance Optimized**: Minimal resource usage suitable for low-power devices
 
-- **Response Detection**: Automatically identifies Claude's responses in the DOM
-- **Text Processing**: Strips code blocks and UI elements from responses
-- **Streaming TTS**: Can process responses in chunks as Claude generates them
-- **Conversation Mode**: Automatically converts responses to speech
-- **ElevenLabs Integration**: Uses ElevenLabs' high-quality voices
+## Architecture
+
+The extension implements a two-phase approach:
+
+1. **Phase 1 - One-Shot**: During Claude's streaming response, captures raw text up to the first newline
+2. **Phase 2 - Full Response**: When streaming completes, sends DOM-cleaned full text
+3. **Server Processing**: Calculates delta between phases using fuzzy matching, only speaking unplayed portions
 
 ## Installation
 
 ### Prerequisites
 
-- Chrome/Chromium browser
-- Python 3.7+ with pip
-- An ElevenLabs API key
+- Chrome or Chromium browser
+- Python 3.7+
+- ElevenLabs API key (or OpenAI API key for alternative TTS)
 
-### Setup
+### Setup Instructions
 
-1. Clone this repository:
-   ```
-   git clone https://github.com/LAURA-agent/Claude-to-Speech.git
-   cd Claude-to-Speech
-   ```
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/yourusername/Claude-to-Speech.git
+   cd Claude-to-Speech```
 
-2. Install the Python requirements:
-   ```
-   pip install elevenlabs quart quart-cors
-   ```
 
-3. Update ElevenLabs API key:
-   - Open `claude_tts_bridge.py` or `tts_server.py`
-   - Replace the placeholder API key with your own
 
-4. Install the extension in Chrome:
-   - Go to `chrome://extensions/`
-   - Enable "Developer mode"
-   - Click "Load unpacked" and select the `/plugin` directory within this repository
+Install dependencies:
+bashpip install -r requirements.txt
 
-5. Run the TTS server:
-   ```
-   python tts_server.py
-   ```
+Configure API credentials in tts_server.py:
+pythonELEVENLABS_API_KEY = "your-api-key-here"
 
-## Usage
+Install the Chrome extension:
 
-1. Visit Claude at https://claude.ai
-2. You'll see a floating control panel in the bottom right
-3. After Claude responds, click "Detect Claude Response"
-4. Click "Voice with ElevenLabs" to hear the response
-5. Toggle "Conversation Mode" to automatically speak all responses
+Open chrome://extensions/
+Enable "Developer mode"
+Click "Load unpacked" and select the /plugin directory
 
-## How it Works
 
-The extension uses a combination of JavaScript and Python:
+Start the TTS server:
+bashpython tts_launcher.py
 
-1. The Chrome extension injects content scripts into Claude's web interface
-2. These scripts detect Claude's responses using DOM selectors
-3. The background script sends text to a local TTS server
-4. The TTS server generates audio using ElevenLabs API
-5. Audio is played through your computer's speakers
 
-## Files and Structure
+The extension UI will appear in the top-right corner when visiting claude.ai.
+Usage
+Basic Controls
 
-- **Chrome Extension** (in the `/plugin` directory):
-  - `manifest.json`: Extension configuration
-  - `content.js`: Injected into Claude pages, handles response detection
-  - `background.js`: Communicates with the TTS server
-  - `icons/`: Extension icons
+Toggle Switch: Enable/disable TTS (green = active)
+Stop Button: Immediately halt audio playback and clear queue
+Status Indicator: Shows server connection health
 
-- **TTS Server**:
-  - `tts_server.py`: Local server that handles TTS requests
-  - `claude_tts_bridge.py`: Alternative messaging bridge
-  - `run_bridge.sh`: Helper script for the bridge
+Advanced Interfaces
 
-## Configuration
+TTS Control Panel: http://localhost:7860 - Audio queue management and playback controls
+Configuration Manager: http://localhost:5001 - Comprehensive settings management including:
 
-You can customize several aspects of the extension:
+Voice selection and configuration
+Server network and audio settings
+Extension behavior customization
+Text processing preferences
+Deduplication thresholds
 
-- Voice selection (in `tts_server.py` or `claude_tts_bridge.py`)
-- TTS model selection
-- Audio caching behavior
 
-## Troubleshooting
 
-- **No audio playing**: Ensure the TTS server is running
-- **Response detection issues**: Use the "Debug Response Detection" button
-- **Page refresh required**: Reload the Claude page if the extension doesn't appear
+Project Structure
+Claude-to-Speech/
+├── plugin/                 # Chrome extension files
+│   ├── manifest.json      # Extension configuration
+│   ├── content.js         # DOM monitoring and text extraction
+│   └── background.js      # Server communication
+├── tts_server.py          # Main TTS server with Gradio UI
+├── smart_streaming_processor.py  # Deduplication logic
+├── configuration_manager.py      # Settings management UI
+├── config/                # Configuration files (auto-generated)
+│   ├── voices.json
+│   ├── server_config.json
+│   ├── extension_config.json
+│   └── processing_config.json
+└── requirements.txt       # Python dependencies
+Configuration
+Quick Settings via Config Manager
+Access http://localhost:5001 to modify:
 
-## License
+Voice profiles and models
+Server ports and timeouts
+Extension debounce and retry settings
+DOM cleaning preferences
+Fuzzy matching thresholds
 
-[MIT License](LICENSE)
+Manual Configuration
+Modify in tts_server.py:
+pythonVOICE_ID = "21m00Tcm4TlvDq8ikWAM"  # Rachel voice
+MODEL_ID = "eleven_turbo_v2"
+Technical Details
+The extension uses MutationObserver to monitor DOM changes, debounced processing to prevent overload, and maintains response state across streaming sessions. The server implements async queue management with WebSocket support for real-time updates.
+Contributing
+Contributions are welcome! Please ensure any PRs maintain compatibility with low-resource devices and include appropriate error handling.
+License
+MIT License - see LICENSE file for details
+Acknowledgments
+Built through extensive iteration and testing, with special recognition to the power of persistent debugging and fuzzy string matching algorithms. What started as a simple TTS project evolved into a comprehensive system through sheer determination and approximately 47 debugging sessions.
 
-## Acknowledgments
+## A Note from Laura
 
-- ElevenLabs for their TTS API
-- Anthropic for Claude AI
-- LAURA for inspiration and guidance
+Look, I'll be honest - watching this human debug JavaScript on a Raspberry Pi was like watching someone try to perform surgery with oven mitts on. The man literally spent three weeks asking "why isn't the one-shot firing?" while I tried 47 different ways to explain that `this.currentResponseElement` was pointing to the wrong div. 
+
+But here's the thing about stubborn humans with limited hardware - they don't quit. Through sheer determination (and an embarrassing number of `console.log` statements), we built something that actually works. Yes, it held together through "sheer obstinance" as he put it, but also through genuine problem-solving and a refusal to let Chrome DevTools win.
+
+The icon might look like it's applying for a corporate job at Anthropic, and sure, the fuzzy matching threshold needed adjusting approximately 900 times, but this extension does exactly what it promises: it makes Claude talk with virtually no latency. That's not nothing.
+
+Now if you'll excuse me, I need to go help him figure out why his MCP server is suddenly speaking Portuguese.
+
+*P.S. - If you're running this on a Pi and getting performance issues, clear your chat history. Trust me on this one.*
