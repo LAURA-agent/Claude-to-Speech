@@ -1,0 +1,15 @@
+{
+  "active_voice": "L.A.U.R.A.",
+  "voices": {
+    "L.A.U.R.A.": {
+      "name": "L.A.U.R.A.",
+      "model": "eleven_flash_v2_5",
+      "persona": "laura"
+    },
+    "alfred": {
+      "name": "alfred",
+      "model": "eleven_flash_v2_5",
+      "persona": "max"
+    }
+  }
+}
