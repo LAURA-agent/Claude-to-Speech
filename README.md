@@ -5,8 +5,7 @@ A high-performance Chrome extension that provides real-time text-to-speech for C
 ## Overview
 
 Claude-to-Speech enhances the Claude.ai interface with a seamless TTS experience that begins speaking responses almost immediately as Claude starts generating them. Built with a focus on performance and reliability, it's been extensively tested on resource-constrained devices including Raspberry Pi.
-
-## Key Features
+The creator of this repository does not come from a traditional developer CS background and has only been experimenting with Python for 6 months.
 
 - **One-Shot Streaming**: Captures and speaks the first line of Claude's response in real-time, reducing perceived latency
 - **Intelligent Deduplication**: Server-side fuzzy matching prevents duplicate audio playback
