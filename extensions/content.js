@@ -1,6 +1,6 @@
 // content.js
-// Claude-to-Speech Content Script - v8.1 (Intuitive Controls)
-console.log("🚀 Claude-to-Speech loaded - v8.1 (Intuitive Controls)");
+// Claude-to-Speech Content Script - v8.2 (Permissive Oneshot Fix)
+console.log("🚀 Claude-to-Speech loaded - v8.2 (Permissive Oneshot Fix)");
 
 class ClaudeStreamMonitor {
   constructor() {
@@ -8,16 +8,16 @@ class ClaudeStreamMonitor {
     this.isMonitoring = false;
     this.processingLock = false;
     this.debounceTimer = null;
-
+    this.isInitializing = false; // New flag to prevent processing on page load
+    
     this.currentResponseElement = null;
     this.currentResponseId = null;
     this.lastKnownRawTextSnapshot = "";
     
-    // 'Magic Phrase' that Claude often starts responses with... 60% of the time it works...everytime
+    // 'Magic Phrase' that Claude often starts responses with
     this.MAGIC_PHRASE = "You're absolutely right";
     this.oneShotFired = false;
     this.sentOneShotRawText = "";  // Raw text that triggered one-shot
-
     
     this.sentChunks = new Set();
     this.serverHealthy = true;
@@ -106,6 +106,7 @@ class ClaudeStreamMonitor {
     this.lastKnownRawTextSnapshot = "";
     this.oneShotFired = false;
     this.sentOneShotRawText = "";
+    this.sentChunks.clear(); // Clear sent chunks for new response
     this.expectingNewResponse = true;
   }
 
@@ -178,6 +179,13 @@ class ClaudeStreamMonitor {
     this.isMonitoring = true;
     await this.resetServerForNewConversation();
     this.resetForNewResponse();
+    
+    // Mark this as a fresh start - ignore any existing messages
+    this.isInitializing = true;
+    setTimeout(() => {
+      this.isInitializing = false;
+      console.log("✅ Initialization period ended, now monitoring for new responses");
+    }, 500); // Give page time to settle
 
     // Find the conversation container
     let conversationContainer =
@@ -193,7 +201,7 @@ class ClaudeStreamMonitor {
     }
 
     this.observer = new MutationObserver((mutations) => {
-        if (!this.conversationMode || !this.isMonitoring || this.processingLock) {
+        if (!this.conversationMode || !this.isMonitoring || this.isInitializing) {
             return;
         }
 
@@ -224,27 +232,27 @@ class ClaudeStreamMonitor {
                 if (newElementCandidate) break; 
             } else if (this.currentResponseElement && 
                      (mutation.target === this.currentResponseElement || this.currentResponseElement.contains(mutation.target))) {
-                if (mutation.type === 'characterData' || (mutation.type === 'attributes' && mutation.attributeName === 'data-is-streaming')) {
-                    processNeeded = true;
-                }
+                // Text content changes within current element
+                processNeeded = true;
             }
             
             // Check for streaming state changes
-            if (mutation.type === 'attributes' && mutation.attributeName === 'data-is-streaming' && mutation.target.getAttribute('data-is-streaming') === 'true') {
-                if (mutation.target.matches && mutation.target.matches('.group.relative, .font-claude-message')) {
-                    // If it's a container, find the .font-claude-message within it
-                    if (mutation.target.classList.contains('font-claude-message')) {
-                        newElementCandidate = mutation.target;
-                    } else {
-                        const fontClaudeMessage = mutation.target.querySelector('.font-claude-message');
-                        if (fontClaudeMessage) {
-                            newElementCandidate = fontClaudeMessage;
+            if (mutation.type === 'attributes' && mutation.attributeName === 'data-is-streaming') {
+                if (mutation.target.getAttribute('data-is-streaming') === 'true') {
+                    if (mutation.target.matches && mutation.target.matches('.group.relative, .font-claude-message')) {
+                        // If it's a container, find the .font-claude-message within it
+                        if (mutation.target.classList.contains('font-claude-message')) {
+                            newElementCandidate = mutation.target;
+                        } else {
+                            const fontClaudeMessage = mutation.target.querySelector('.font-claude-message');
+                            if (fontClaudeMessage) {
+                                newElementCandidate = fontClaudeMessage;
+                            }
                         }
+                        processNeeded = true;
                     }
-                    processNeeded = true;
                 }
             }
-            if (newElementCandidate && processNeeded) break;
         }
 
         // Handle new element candidates
@@ -254,30 +262,27 @@ class ClaudeStreamMonitor {
             // Check if this is actually a new message or just an update
             if (this.currentResponseElement) {
                 if (this.currentResponseElement.contains(newElementCandidate)) {
-                    //console.log(`[DEBUG OBSERVER] New candidate is a DESCENDANT of the current element. Treating as update.`);
                     isTrulyNewResponse = false;
                 } else if (newElementCandidate.contains(this.currentResponseElement)) {
-                    //console.log(`[DEBUG OBSERVER] New candidate CONTAINS the current element. Treating as update.`);
                     isTrulyNewResponse = false;
                 } else if (this.currentResponseElement.classList.contains('font-claude-message') && 
                          newElementCandidate.classList.contains('font-claude-message')) {
                     // Two different .font-claude-message elements = different messages
-                    //console.log(`[DEBUG OBSERVER] Different .font-claude-message elements detected. New message.`);
                     isTrulyNewResponse = true;
                 }
             }
 
             if (isTrulyNewResponse) {
-                //console.log(`[DEBUG OBSERVER] New element candidate IDENTIFIED as TRULY NEW response. Switching element focus and RESETTING client state.`);
+                console.log(`[DEBUG] New response detected. Resetting state.`);
                 this.currentResponseElement = newElementCandidate;
                 this._setupAttributeObserver(this.currentResponseElement);
                 this.resetForNewResponse();
-                this.debounceAndProcess();
+                // Process immediately for fast oneshot detection
+                this.processTextUpdate();
             } else {
-                //console.log(`[DEBUG OBSERVER] New element candidate considered an UPDATE to the current response.`);
                 this.currentResponseElement = newElementCandidate; 
                 this._setupAttributeObserver(this.currentResponseElement);
-                this.debounceAndProcess(); 
+                this.debounceAndProcess();
             }
 
         } else if (processNeeded && this.currentResponseElement) {
@@ -286,10 +291,10 @@ class ClaudeStreamMonitor {
             // Look for initial element when monitoring starts
             const initialElement = this.findInitialResponseElement();
             if (initialElement) {
-                //console.log(`[DEBUG OBSERVER] Found initial element. Setting up.`);
                 this.currentResponseElement = initialElement;
                 this._setupAttributeObserver(this.currentResponseElement);
-                this.debounceAndProcess();
+                // Process immediately for fast oneshot detection
+                this.processTextUpdate();
             }
         }
     });
@@ -303,29 +308,17 @@ class ClaudeStreamMonitor {
     });
     console.log("✅ Observer attached.");
 
-    // Check for initial streaming element
-    const initialElement = this.findInitialResponseElement();
-    if (initialElement) {
-      console.log(`[DEBUG] Initial response element found on startMonitoring:`, initialElement);
-      this.currentResponseElement = initialElement;
-      this._setupAttributeObserver(this.currentResponseElement);
-      this._setupMutationObserver(this.currentResponseElement);
-      this.debounceAndProcess(); 
+    // Check for initial streaming element ONLY if not a page reload initialization
+    if (!this.isInitializing) {
+      const initialElement = this.findInitialResponseElement();
+      if (initialElement) {
+        console.log(`[DEBUG] Initial response element found on startMonitoring:`, initialElement);
+        this.currentResponseElement = initialElement;
+        this._setupAttributeObserver(this.currentResponseElement);
+        // Process immediately for fast oneshot detection
+        this.processTextUpdate();
+      }
     }
-  }
-
-  _setupMutationObserver(element) {
-      if (this.mutationObserver) this.mutationObserver.disconnect();
-      
-      this.mutationObserver = new MutationObserver(() => {
-          this.debounceAndProcess();
-      });
-      
-      this.mutationObserver.observe(element, {
-          childList: true,
-          characterData: true,
-          subtree: true
-      });
   }
 
   _setupAttributeObserver(element) {
@@ -339,7 +332,6 @@ class ClaudeStreamMonitor {
           mutations.forEach(mutation => {
               if (mutation.attributeName === 'data-is-streaming') {
                   const isNowStreaming = mutation.target.getAttribute('data-is-streaming') === 'true';
-                  // Remove the element comparison - just check if streaming ended
                   if (!isNowStreaming && this.isMonitoring) {
                       console.log('🏁 Streaming end detected by attribute observer.');
                       clearTimeout(this.debounceTimer); 
@@ -363,86 +355,61 @@ class ClaudeStreamMonitor {
     clearTimeout(this.debounceTimer);
     this.debounceTimer = setTimeout(() => {
       this.processTextUpdate();
-    }, 100); 
+    }, 50); // Reduced debounce for faster oneshot detection
   }
 
-  // Process text updates during streaming for one-shot detection
+  // SIMPLIFIED & PERMISSIVE processTextUpdate - inspired by v10 working version
   processTextUpdate() {
-    
-    //console.log('[DEBUG PTU] processTextUpdate called');
-    //console.log('[DEBUG PTU] currentResponseElement:', this.currentResponseElement);
-    //console.log('[DEBUG PTU] Element classes:', this.currentResponseElement?.className);
-    
-    if (this.processingLock || !this.currentResponseElement || this.oneShotFired || !this.isMonitoring) {
-        if (this.oneShotFired && this.isMonitoring) console.debug("[DEBUG PTU] One-shot already fired, skipping live processing.");
-        this.processingLock = false;
+    if (!this.currentResponseElement || !this.isMonitoring || this.isInitializing) {
         return;
     }
     
-    // Ensure we have the .font-claude-message element
-    if (!this.currentResponseElement.classList.contains('font-claude-message')) {
-        const fontClaudeMessage = this.currentResponseElement.querySelector('.font-claude-message');
+    // Get the actual text content element - be more flexible
+    let textElement = this.currentResponseElement;
+    
+    // If current element doesn't have .font-claude-message class, look for it
+    if (!textElement.classList.contains('font-claude-message')) {
+        const fontClaudeMessage = textElement.querySelector('.font-claude-message');
         if (fontClaudeMessage) {
-            console.log('[DEBUG PTU] Correcting currentResponseElement to .font-claude-message');
+            textElement = fontClaudeMessage;
             this.currentResponseElement = fontClaudeMessage;
-        } else {
-            console.warn('[DEBUG PTU] Cannot find .font-claude-message element');
-            this.processingLock = false;
-            return;
         }
     }
     
-    this.processingLock = true;
-    try {
-      const rawText = this.currentResponseElement.textContent || "";
-      //console.log('[DEBUG PTU] Checking for newlines. Raw text:', rawText);
-      //console.log('[DEBUG PTU] First newline at position:', rawText.indexOf('\n'));
-      //console.log('[DEBUG PTU] Text preview with markers:', rawText.substring(0, 200).replace(/\n/g, '[NEWLINE]'));
-      //console.log('[DEBUG PTU] Raw text length:', rawText.length, 'First 50 chars:', rawText.substring(0, 50));
-      debugger;
-      
-
-      // Skip if text hasn't changed
-      if (rawText === this.lastKnownRawTextSnapshot) {
-          this.processingLock = false;
-          return;
-      }
-      this.lastKnownRawTextSnapshot = rawText;
-      
-      // Skip if text hasn't changed
-      if (rawText === this.lastKnownRawTextSnapshot && this.isStreaming()) {
-        this.processingLock = false;
-        return; 
-      }
-      this.lastKnownRawTextSnapshot = rawText;
-
-      // Look for first newline to send one-shot
-      if (!this.oneShotFired) {
+    // Extract raw text content
+    const rawText = textElement.textContent || textElement.innerText || "";
+    
+    // Skip if text hasn't changed
+    if (rawText === this.lastKnownRawTextSnapshot) {
+        return;
+    }
+    
+    // Update our snapshot
+    this.lastKnownRawTextSnapshot = rawText;
+    
+    // FAST ONESHOT DETECTION - Only while streaming
+    if (!this.oneShotFired && rawText.length > 0 && this.isStreaming()) {
         const firstNewline = rawText.indexOf('\n');
-
-        if (firstNewline !== -1) {
+        
+        if (firstNewline !== -1 && firstNewline > 0) {
+            // Found a newline, send oneshot immediately
             let oneShotCandidateText = rawText.substring(0, firstNewline);
             
-            // Still check for magic phrase to find start position
+            // Check for magic phrase
             const magicIndex = oneShotCandidateText.indexOf(this.MAGIC_PHRASE);
             let textForTTS = (magicIndex !== -1) ? oneShotCandidateText.substring(magicIndex) : oneShotCandidateText;
             
             if (textForTTS.trim()) {
-                // Send RAW text - no cleaning
+                // Send RAW text immediately - no cleaning
                 this.sendChunk(textForTTS, false, this.currentResponseId + "-oneshot");
                 this.oneShotFired = true;
-                this.sentOneShotRawText = textForTTS; // Store what we sent
-                console.log("[DEBUG PTU] One-shot sent (raw): ", textForTTS);
+                this.sentOneShotRawText = textForTTS;
+                console.log("[ONESHOT] Sent immediately: ", textForTTS);
             }
         }
     }
-    } catch (error) {
-      console.error("❌ Error in processTextUpdate:", error);
-    } finally {
-      this.processingLock = false;
-    }
+    // Removed the fallback that was sending oneshot after streaming ended
   }
-  
 
   // Extract clean text from settled DOM structure
   getCleanedDOMText(element) {
@@ -471,9 +438,9 @@ class ClaudeStreamMonitor {
       return clone.textContent.trim();
   }
 
-  // Handle when streaming ends - send full cleaned response
+  // Handle when streaming ends - send remaining cleaned response
   handleStreamingEnd() {
-    console.log(`[DEBUG HEND] Called. Streaming has ended.`);
+    console.log(`[DEBUG HEND] Streaming has ended. Oneshot fired: ${this.oneShotFired}`);
 
     if (!this.isMonitoring || !this.currentResponseElement) {
         if (this.attributeObserver) this.attributeObserver.disconnect();
@@ -491,9 +458,9 @@ class ClaudeStreamMonitor {
     const cleanedFullResponseText = this.getCleanedDOMText(claudeResponseElement);
     console.log(`[DEBUG HEND] Full cleaned text: "${cleanedFullResponseText.substring(0, 100)}..." (Length: ${cleanedFullResponseText.length})`);
     
-    // Always send the full cleaned text when streaming ends
+    // Send the complete response (server will handle deduplication if oneshot was sent)
     if (cleanedFullResponseText.trim()) {
-        console.log(`[DEBUG HEND] Sending full response as complete.`);
+        console.log(`[DEBUG HEND] Sending full response as complete. Server will deduplicate if needed.`);
         this.sendChunk(cleanedFullResponseText, true, this.currentResponseId + "-complete");
     }
     
@@ -504,45 +471,46 @@ class ClaudeStreamMonitor {
   
   // Check if Claude is actively streaming
   isStreaming() {
-    return (this.currentResponseElement && this.currentResponseElement.getAttribute('data-is-streaming') === 'true') ||
+    const streamingContainer = this.currentResponseElement?.closest('[data-is-streaming]');
+    return (streamingContainer && streamingContainer.getAttribute('data-is-streaming') === 'true') ||
            (document.querySelector('button[type="submit"]') && document.querySelector('button[type="submit"]').disabled);
   }
 
-  // Send text chunk to TTS server
   sendChunk(text, isComplete, responseIdSegment) {
-    if (!text || text.trim().length === 0) {
-        console.log("📎 Skipping empty text chunk for", responseIdSegment);
-        return;
-    }
-    
-    const baseResponseId = this.currentResponseId;
-    const textHash = this.simpleHash(text + (isComplete ? '_complete' : '_incomplete') + baseResponseId);
-    
-    if (this.sentChunks.has(textHash) && isComplete) {
-        console.log(`📎 Skipping already sent complete chunk for ${baseResponseId}`);
-        return;
-    }
-    
-    console.log(`📤 Sending to server ${responseIdSegment}: "${text.substring(0, 50)}..." (complete: ${isComplete})`);
-    
-    const payload = { 
-      text: text, 
-      is_complete: isComplete, 
-      response_id: responseIdSegment 
-    };
-    
-    this.sendToServer("/stream", payload)
-      .then(() => {
-        if (isComplete) {
-            this.sentChunks.add(textHash); 
-        }
-      })
-      .catch(error => {
-        console.error(`Failed to send ${responseIdSegment}:`, error.message);
-        if (!this.failedRequests.some(req => req.response_id === payload.response_id)) {
-          this.failedRequests.push(payload); 
-        }
-      });
+      if (!text || text.trim().length === 0) {
+          console.log("📎 Skipping empty text chunk for", responseIdSegment);
+          return;
+      }
+      
+      const baseResponseId = this.currentResponseId;
+      const textHash = this.simpleHash(text + (isComplete ? '_complete' : '_incomplete') + baseResponseId);
+      
+      // Only check for duplicates on complete chunks
+      if (isComplete && this.sentChunks.has(textHash)) {
+          console.log(`📎 Skipping already sent chunk for ${baseResponseId}`);
+          return;
+      }
+      
+      console.log(`📤 Sending to server ${responseIdSegment}: "${text.substring(0, 50)}..." (complete: ${isComplete})`);
+      
+      const payload = { 
+        text: text, 
+        is_complete: isComplete, 
+        response_id: responseIdSegment 
+      };
+      
+      this.sendToServer("/stream", payload)
+        .then(() => {
+          if (isComplete) {
+              this.sentChunks.add(textHash); 
+          }
+        })
+        .catch(error => {
+          console.error(`Failed to send ${responseIdSegment}:`, error.message);
+          if (!this.failedRequests.some(req => req.response_id === payload.response_id)) {
+            this.failedRequests.push(payload); 
+          }
+        });
   }
 
   simpleHash(str) {
@@ -608,48 +576,48 @@ class TTSControlPanel {
     this.statusInterval = setInterval(() => this.updateStatus(), 1000); 
   }
 
-createPanel() {
-  // Remove any existing panels first
-  const existingPanel = document.getElementById('claude-tts-panel');
-  if (existingPanel) {
-    existingPanel.remove();
-  }
-  
-  const panel = document.createElement('div');
-  panel.id = 'claude-tts-panel';
-  const header = document.querySelector('[class*="inline-flex items-center justify-center relative shrink-0"]');
-  const insertAfter = header?.closest('header') || document.body;
-  
-  panel.innerHTML = `
-    <div style="position: fixed; top: ${insertAfter === document.body ? '45px' : '60px'}; right: 20px; z-index: 10000;
-      background: rgba(30, 30, 30, 0.85); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
-      border: 1px solid rgba(255, 255, 255, 0.1); padding: 6px 7px; border-radius: 6px; 
-      display: flex; align-items: center; gap: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.2);
-      font-family: 'Copernicus', serif; width: fit-content;">
-      
-      <span style="font-size: 20px; font-weight: 400; color: #FEFEFE; line-height: 1;">Claude-to-Speech</span>
-      
-      <div id="tts-toggle-container" style="position: relative; display: flex; align-items: center; cursor: pointer; width: 10px; height: 18px;">
-        <div style="position: absolute; width: 10px; height: 100%; background: rgba(96, 96, 96, 0.3); border-radius: 5px; left: 50%; transform: translateX(-50%);"></div>
-        <div id="tts-toggle-knob" style="width: 9px; height: 9px; border-radius: 50%; background: rgb(255, 255, 255); 
-          position: absolute; transition: transform 0.2s ease; z-index: 1; 
-          left: 50%; transform: translateX(-50%) translateY(9px);
-          box-shadow: 0 1px 3px rgba(0,0,0,0.3);"></div>
+  createPanel() {
+    // Remove any existing panels first
+    const existingPanel = document.getElementById('claude-tts-panel');
+    if (existingPanel) {
+      existingPanel.remove();
+    }
+    
+    const panel = document.createElement('div');
+    panel.id = 'claude-tts-panel';
+    const header = document.querySelector('[class*="inline-flex items-center justify-center relative shrink-0"]');
+    const insertAfter = header?.closest('header') || document.body;
+    
+    panel.innerHTML = `
+      <div style="position: fixed; top: ${insertAfter === document.body ? '45px' : '60px'}; right: 20px; z-index: 10000;
+        background: rgba(30, 30, 30, 0.85); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+        border: 1px solid rgba(255, 255, 255, 0.1); padding: 6px 7px; border-radius: 6px; 
+        display: flex; align-items: center; gap: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.2);
+        font-family: 'Copernicus', serif; width: fit-content;">
+        
+        <span style="font-size: 20px; font-weight: 400; color: #FEFEFE; line-height: 1;">Claude-to-Speech</span>
+        
+        <div id="tts-toggle-container" style="position: relative; display: flex; align-items: center; cursor: pointer; width: 10px; height: 18px;">
+          <div style="position: absolute; width: 10px; height: 100%; background: rgba(96, 96, 96, 0.3); border-radius: 5px; left: 50%; transform: translateX(-50%);"></div>
+          <div id="tts-toggle-knob" style="width: 9px; height: 9px; border-radius: 50%; background: rgb(255, 255, 255); 
+            position: absolute; transition: transform 0.2s ease; z-index: 1; 
+            left: 50%; transform: translateX(-50%) translateY(9px);
+            box-shadow: 0 1px 3px rgba(0,0,0,0.3);"></div>
+        </div>
+        
+        <button id="tts-stop-button" style="width: 24px; height: 24px; border-radius: 4px; 
+          background: rgba(255, 59, 48, 0.2); border: 1px solid rgba(255, 59, 48, 0.3);
+          display: none; align-items: center; justify-content: center;
+          cursor: pointer; transition: all 0.2s ease;">
+          <div style="width: 8px; height: 8px; background: #FF3B30; border-radius: 1px;"></div>
+        </button>
+        
+        <div id="tts-status-icon" style="width: 6px; height: 6px; border-radius: 50%; background: #505050;"></div>
       </div>
-      
-      <button id="tts-stop-button" style="width: 24px; height: 24px; border-radius: 4px; 
-        background: rgba(255, 59, 48, 0.2); border: 1px solid rgba(255, 59, 48, 0.3);
-        display: none; align-items: center; justify-content: center;
-        cursor: pointer; transition: all 0.2s ease;">
-        <div style="width: 8px; height: 8px; background: #FF3B30; border-radius: 1px;"></div>
-      </button>
-      
-      <div id="tts-status-icon" style="width: 6px; height: 6px; border-radius: 50%; background: #505050;"></div>
-    </div>
-  `;
+    `;
 
-  if (insertAfter === document.body) document.body.appendChild(panel);
-  else insertAfter.insertAdjacentElement('afterend', panel);
+    if (insertAfter === document.body) document.body.appendChild(panel);
+    else insertAfter.insertAdjacentElement('afterend', panel);
 
     // TOGGLE SWITCH LOGIC
     panel.querySelector('#tts-toggle-container').addEventListener('click', async () => {
@@ -715,27 +683,36 @@ createPanel() {
 }
 
 // Initialize
-if (typeof window.claudeStreamMonitor_v8_1 === 'undefined') {
-  window.claudeStreamMonitor_v8_1 = new ClaudeStreamMonitor();
-  window.ttsPanel_v8_1 = new TTSControlPanel(window.claudeStreamMonitor_v8_1);
+if (typeof window.claudeStreamMonitor_v8_2 === 'undefined') {
+  window.claudeStreamMonitor_v8_2 = new ClaudeStreamMonitor();
+  window.ttsPanel_v8_2 = new TTSControlPanel(window.claudeStreamMonitor_v8_2);
   
   // Initialize based on stored settings
   chrome.storage.local.get(['conversationMode'], (result) => {
     const storedMode = (result && typeof result.conversationMode === 'boolean') ? result.conversationMode : false;
-    console.log(`Init v8.1: Stored conversation mode: ${storedMode}`);
+    console.log(`Init v8.2: Stored conversation mode: ${storedMode}`);
     
-    window.claudeStreamMonitor_v8_1.conversationMode = storedMode; 
+    window.claudeStreamMonitor_v8_2.conversationMode = storedMode; 
     
     if (storedMode) {
-      // If was on, start monitoring (which now includes server reset)
-      window.claudeStreamMonitor_v8_1.startMonitoringAndResetServer(); 
+      // If TTS was ON before reload, we need to be careful
+      console.log("⚠️ TTS was ON before page reload. Starting carefully...");
+      // Mark as initializing to prevent processing existing messages
+      window.claudeStreamMonitor_v8_2.isInitializing = true;
+      window.claudeStreamMonitor_v8_2.startMonitoringAndResetServer().then(() => {
+        // Give extra time on page reload before allowing processing
+        setTimeout(() => {
+          window.claudeStreamMonitor_v8_2.isInitializing = false;
+          console.log("✅ Page reload initialization complete. Now monitoring for new responses only.");
+        }, 1000);
+      });
     }
-    window.ttsPanel_v8_1.updateStatus(); 
+    window.ttsPanel_v8_2.updateStatus(); 
   });
 } else {
-  console.log("✨ Claude-to-Speech v8.1 already initialized. Ensuring panel status is updated.");
-  if (window.claudeStreamMonitor_v8_1 && window.ttsPanel_v8_1) {
-    window.ttsPanel_v8_1.monitor = window.claudeStreamMonitor_v8_1;
-    window.ttsPanel_v8_1.updateStatus(); 
+  console.log("✨ Claude-to-Speech v8.2 already initialized. Ensuring panel status is updated.");
+  if (window.claudeStreamMonitor_v8_2 && window.ttsPanel_v8_2) {
+    window.ttsPanel_v8_2.monitor = window.claudeStreamMonitor_v8_2;
+    window.ttsPanel_v8_2.updateStatus(); 
   }
 }
