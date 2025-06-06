@@ -4,7 +4,7 @@ import os
 import time
 import asyncio
 import uuid
-import pyaudio
+import pygame
 from mutagen.mp3 import MP3
 from asyncio import Event
 import numpy as np
@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
 import ctypes
 import datetime
-import shutil
+import threading
 
 try:
     from elevenlabs.client import ElevenLabs
@@ -23,18 +23,18 @@ except ImportError:
 try:
     from config.tts_config import ELEVENLABS_API_KEY, ACTIVE_VOICE, VOICES_DATA
     ELEVENLABS_VOICE = VOICES_DATA.get(ACTIVE_VOICE, {}).get("name", ACTIVE_VOICE)
-    ELEVENLABS_MODEL = VOICES_DATA.get(ACTIVE_VOICE, {}).get("model", "eleven_turbo_v2")
+    ELEVENLABS_MODEL = VOICES_DATA.get(ACTIVE_VOICE, {}).get("model", "eleven_flash_v2_5")
     print(f"✅ Loaded from tts_config: Voice={ELEVENLABS_VOICE}, Model={ELEVENLABS_MODEL}")
 except ImportError:
     print("⚠️ Failed to import from config.tts_config. Using environment variables.")
     ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
     ELEVENLABS_VOICE = os.environ.get("ELEVENLABS_VOICE", "L.A.U.R.A.")
-    ELEVENLABS_MODEL = os.environ.get("ELEVENLABS_MODEL", "eleven_turbo_v2")
+    ELEVENLABS_MODEL = os.environ.get("ELEVENLABS_MODEL", "eleven_flash_v2_5")
 except Exception as e:
     print(f"⚠️ Config error: {e}. Using environment variables.")
     ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
     ELEVENLABS_VOICE = os.environ.get("ELEVENLABS_VOICE", "L.A.U.R.A.")
-    ELEVENLABS_MODEL = os.environ.get("ELEVENLABS_MODEL", "eleven_turbo_v2")
+    ELEVENLABS_MODEL = os.environ.get("ELEVENLABS_MODEL", "eleven_flash_v2_5")
 
 if not ELEVENLABS_API_KEY:
     print("❌ CRITICAL: ElevenLabs API key not found!")
@@ -44,20 +44,7 @@ if not ELEVENLABS_API_KEY:
 AUDIO_CACHE_DIR = os.path.expanduser("~/claude-to-speech/audio_cache")
 os.makedirs(AUDIO_CACHE_DIR, exist_ok=True)
 
-# Dynamic mpg123 path
-MPG123_PATH = shutil.which("mpg123")
-if not MPG123_PATH:
-    common_paths = ["/usr/bin/mpg123", "/usr/local/bin/mpg123", "/opt/homebrew/bin/mpg123"]
-    for path in common_paths:
-        if os.path.exists(path):
-            MPG123_PATH = path
-            break
-
-if not MPG123_PATH:
-    print("❌ CRITICAL: mpg123 not found!")
-    raise FileNotFoundError("mpg123 not found. Install with: sudo apt-get install mpg123")
-
-print(f"🎵 Audio setup: Cache={AUDIO_CACHE_DIR}, mpg123={MPG123_PATH}")
+print(f"🎵 Audio setup: Cache={AUDIO_CACHE_DIR}, Using pygame for cross-platform playback")
 # ===================================
 
 @dataclass
@@ -77,23 +64,30 @@ class AudioManager:
         os.makedirs('logs', exist_ok=True)
         log_file = f"logs/audio_init_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 
-        ERROR_HANDLER_FUNC = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_int,
-                                             ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p)
-        def py_error_handler(filename, line, function, err, fmt):
-            # Ensure fmt is decoded if it's bytes
-            log_message = f'ALSA: {function.decode("utf-8") if isinstance(function, bytes) else function} {fmt.decode("utf-8") if isinstance(fmt, bytes) else fmt}\n'
-            with open(log_file, 'a') as f:
-                f.write(log_message)
-        c_error_handler = ERROR_HANDLER_FUNC(py_error_handler)
+        # Initialize pygame mixer for cross-platform audio
         try:
-            asound = ctypes.CDLL('libasound.so.2')
-            asound.snd_lib_error_set_handler(c_error_handler)
+            pygame.mixer.pre_init(frequency=44100, size=-16, channels=2, buffer=1024)
+            pygame.mixer.init()
+            print("🎵 Pygame audio mixer initialized successfully!")
         except Exception as e:
-            print(f"Could not set ALSA error handler: {e}") # Log this potential issue
+            print(f"❌ CRITICAL: Failed to initialize pygame audio mixer: {e}")
+            return
 
-        self.pa = pyaudio.PyAudio()
-        self.audio_stream = None
-        self.current_process = None
+        # ALSA error handler (Linux only, but won't break other systems)
+        if os.name == 'posix':  # Only on Unix-like systems
+            ERROR_HANDLER_FUNC = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_int,
+                                                 ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p)
+            def py_error_handler(filename, line, function, err, fmt):
+                log_message = f'ALSA: {function.decode("utf-8") if isinstance(function, bytes) else function} {fmt.decode("utf-8") if isinstance(fmt, bytes) else fmt}\n'
+                with open(log_file, 'a') as f:
+                    f.write(log_message)
+            c_error_handler = ERROR_HANDLER_FUNC(py_error_handler)
+            try:
+                asound = ctypes.CDLL('libasound.so.2')
+                asound.snd_lib_error_set_handler(c_error_handler)
+            except Exception as e:
+                print(f"Could not set ALSA error handler: {e}")
+
         self.audio_complete = Event()
         self.audio_complete.set()
         self.audio_state_changed = asyncio.Queue()
@@ -106,27 +100,25 @@ class AudioManager:
         self.is_processing_queue = False
         self.sample_rate = 16000
         self.frame_length = 2048
+        self.playback_thread = None
+        self.stop_playback_event = threading.Event()
 
         if ElevenLabs is None:
             print("CRITICAL: ElevenLabs package is not installed. TTS functionality will fail.")
-            # self._initialized remains False if critical dependencies are missing
-            return # Exit init early if ElevenLabs is not available
+            return
 
         try:
             self.eleven = ElevenLabs(api_key=ELEVENLABS_API_KEY)
-            # A simple test call to ensure API key is valid, if desired
-            # self.eleven.models.get_all() # This would raise if API key is bad
         except Exception as e:
             print(f"CRITICAL: Failed to initialize ElevenLabs client: {e}. TTS functionality will fail.")
-            # self._initialized remains False
-            return # Exit init early
+            return
 
         print(f"\n=== Audio System Initialization ===")
         print(f"Sample Rate: {self.sample_rate} Hz")
         print(f"Frame Length: {self.frame_length} samples")
         print(f"Audio debug logs: {log_file}")
         print("=================================\n")
-        self._initialized = True # Set to True after successful initialization steps
+        self._initialized = True
 
     def is_initialized(self) -> bool:
         """Check if the audio manager has been successfully initialized."""
@@ -137,7 +129,8 @@ class AudioManager:
         await self.stop_audio_queue()
         await self.clear_queue()
         self.state = AudioManagerState()
-        self.processed_response_ids.clear()
+        if hasattr(self, 'processed_response_ids'):
+            self.processed_response_ids.clear()
         if not self.is_processing_queue:
             self.queue_processor_task = asyncio.create_task(self.process_audio_queue())
 
@@ -164,7 +157,6 @@ class AudioManager:
 
             await self.audio_queue.put((audio_file, None, delete_after_play))
 
-            # Always ensure processor is running when items are queued
             if not self.is_processing_queue:
                 self.queue_processor_task = asyncio.create_task(self.process_audio_queue())
             elif self.queue_processor_task and self.queue_processor_task.done():
@@ -172,7 +164,6 @@ class AudioManager:
                 self.queue_processor_task = asyncio.create_task(self.process_audio_queue())
         else:
             print("No audio file or text provided to queue_audio.")
-
 
     def _generate_unique_audio_filename(self, ext="mp3") -> str:
         ts = int(time.time() * 1000)
@@ -187,15 +178,13 @@ class AudioManager:
         print(f"🔊 [AudioManager] Generating TTS MP3 for: {text[:64]}...")
         
         try:
-            loop = asyncio.get_event_loop()
             audio_data_chunks = []
-            # Correctly call the generator and accumulate chunks
             for chunk in self.eleven.generate(
                 text=text,
                 voice=ELEVENLABS_VOICE,
                 model=ELEVENLABS_MODEL,
-                output_format="mp3_44100_128", # Verify this format is still optimal/correct
-                stream=True # Ensure streaming is used if processing chunk by chunk
+                output_format="mp3_44100_128",
+                stream=True
             ):
                 if chunk:
                     audio_data_chunks.append(chunk)
@@ -217,7 +206,6 @@ class AudioManager:
             
         except Exception as e:
             print(f"❌ [AudioManager] ElevenLabs error during TTS generation or saving: {e}")
-            # Consider removing file_path if saving failed partially
             if os.path.exists(file_path):
                 try:
                     os.remove(file_path)
@@ -237,34 +225,137 @@ class AudioManager:
             while self.is_processing_queue:
                 try:
                     audio_file, _, delete_after_play = await self.audio_queue.get()
-                    if audio_file: # Ensure audio_file is not None
+                    if audio_file:
                         print(f"Processing from queue: {audio_file}")
                         await self.play_audio(audio_file, delete_after_play)
                         async with self.state_lock:
                             self.state.currently_queued_files.discard(audio_file)
                     self.audio_queue.task_done()
                 except asyncio.TimeoutError:
-                    if self.audio_queue.empty() and not self.is_processing_queue: # Check for shutdown condition
+                    if self.audio_queue.empty() and not self.is_processing_queue:
                         break
                     continue 
                 except Exception as e:
                     print(f"Error processing audio queue item: {e}")
-                    # Potentially put item back in queue or log for retry
                     await asyncio.sleep(0.1)
                     continue
         finally:
             self.is_processing_queue = False
             print("Audio queue processor stopped.")
 
+    def _pygame_playback_worker(self, audio_file: str):
+        """Worker function to handle pygame playback in a separate thread"""
+        try:
+            pygame.mixer.music.load(audio_file)
+            pygame.mixer.music.play()
+            
+            # Wait for playback to finish
+            while pygame.mixer.music.get_busy() and not self.stop_playback_event.is_set():
+                time.sleep(0.1)
+                
+        except Exception as e:
+            print(f"Error in pygame playback worker: {e}")
+
+    async def play_audio(self, audio_file: str, delete_after_play: bool = False):
+        if not self._initialized:
+            print("AudioManager is not initialized. Cannot play audio.")
+            return
+        if not os.path.exists(audio_file):
+            print(f"Audio file not found: {audio_file}")
+            return
+
+        async with self.playback_lock:
+            async with self.state_lock:
+                self.state.is_speaking = True
+                self.state.is_playing = True
+                self.state.playback_start_time = time.time()
+                self.state.current_audio_file = audio_file
+            
+            self.audio_complete.clear()
+            self.stop_playback_event.clear()
+            print(f"Playing audio: {audio_file}")
+
+            try:
+                # Get audio duration for timing
+                try:
+                    audio_info = MP3(audio_file)
+                    async with self.state_lock:
+                        self.state.expected_duration = audio_info.info.length
+                except Exception as e:
+                    print(f"Warning: Error calculating audio duration for {audio_file}: {e}")
+                    async with self.state_lock:
+                        self.state.expected_duration = 2.0
+
+                # Start playback in a separate thread
+                self.playback_thread = threading.Thread(
+                    target=self._pygame_playback_worker, 
+                    args=(audio_file,)
+                )
+                self.playback_thread.start()
+
+                # Wait for playback to complete
+                while self.playback_thread.is_alive():
+                    await asyncio.sleep(0.1)
+                    
+                self.playback_thread.join()
+
+            except Exception as e:
+                print(f"Error in play_audio for {audio_file}: {e}")
+            finally:
+                async with self.state_lock:
+                    self.state.is_speaking = False
+                    self.state.is_playing = False
+                    self.state.playback_start_time = None
+                    self.state.current_audio_file = None
+                    self.state.expected_duration = None
+                
+                self.audio_complete.set()
+                await self.audio_state_changed.put(('audio_completed', True))
+                print(f"Finished playing: {audio_file}")
+
+                if delete_after_play and os.path.exists(audio_file):
+                    try:
+                        os.remove(audio_file)
+                        print(f"Deleted audio file: {audio_file}")
+                    except Exception as e:
+                        print(f"Error deleting audio file {audio_file}: {e}")
+
+    async def stop_current_audio(self):
+        print("Stopping current audio...")
+        
+        # Signal the playback thread to stop
+        self.stop_playback_event.set()
+        
+        # Stop pygame playback
+        try:
+            pygame.mixer.music.stop()
+        except Exception as e:
+            print(f"Error stopping pygame playback: {e}")
+        
+        # Wait for playback thread to finish
+        if self.playback_thread and self.playback_thread.is_alive():
+            self.playback_thread.join(timeout=2.0)
+            if self.playback_thread.is_alive():
+                print("Warning: Playback thread did not stop gracefully")
+
+        async with self.state_lock:
+            if self.state.is_playing:
+                self.state.is_speaking = False
+                self.state.is_playing = False
+                self.state.playback_start_time = None
+                self.state.current_audio_file = None
+                self.state.expected_duration = None
+        
+        self.audio_complete.set()
+        await self.audio_state_changed.put(('audio_stopped', True))
+        print("Audio stop sequence complete.")
 
     async def stop_audio_queue(self):
         print("Attempting to stop audio queue processor...")
-        self.is_processing_queue = False # Signal the loop to stop
+        self.is_processing_queue = False
         if self.queue_processor_task and not self.queue_processor_task.done():
             try:
-                # Add a small item to unblock .get() if it's waiting indefinitely without timeout
-                # This is a common pattern for graceful shutdown of queue consumers
-                await self.audio_queue.put((None, None, False)) 
+                await self.audio_queue.put((None, None, False))
                 await asyncio.wait_for(self.queue_processor_task, timeout=5.0)
                 print("Audio queue processor task joined.")
             except asyncio.TimeoutError:
@@ -278,125 +369,12 @@ class AudioManager:
                 print(f"Exception during queue processor stop: {e}")
         self.queue_processor_task = None
 
-
-    async def play_audio(self, audio_file: str, delete_after_play: bool = False):
-        if not self._initialized:
-            print("AudioManager is not initialized. Cannot play audio.")
-            return
-        if not os.path.exists(audio_file):
-            print(f"Audio file not found: {audio_file}")
-            return
-
-        async with self.playback_lock: # Ensure only one playback at a time
-            async with self.state_lock:
-                self.state.is_speaking = True
-                self.state.is_playing = True
-                self.state.playback_start_time = time.time()
-                self.state.current_audio_file = audio_file
-            self.audio_complete.clear()
-            print(f"Playing audio: {audio_file}")
-
-            try:
-                try:
-                    audio_info = MP3(audio_file)
-                    async with self.state_lock:
-                        self.state.expected_duration = audio_info.info.length
-                except Exception as e:
-                    print(f"Warning: Error calculating audio duration for {audio_file}: {e}")
-                    async with self.state_lock:
-                        self.state.expected_duration = 2.0 # Default fallback
-
-                self.current_process = await asyncio.create_subprocess_shell(
-                    f'{MPG123_PATH} -q "{audio_file}"',
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.PIPE # Capture stderr for debugging
-                )
-                _, stderr_data = await self.current_process.communicate() # Wait for completion
-
-                if self.current_process.returncode != 0:
-                    print(f"mpg123 error for {audio_file}. Return code: {self.current_process.returncode}")
-                    if stderr_data:
-                        print(f"mpg123 stderr: {stderr_data.decode().strip()}")
-                
-                # No explicit sleep needed here if communicate() waits fully
-
-            except Exception as e:
-                print(f"Error in play_audio for {audio_file}: {e}")
-            finally:
-                if self.current_process and self.current_process.returncode is None: # Process might still be running if an error occurred above communicate
-                    try:
-                        self.current_process.terminate()
-                        await self.current_process.wait()
-                    except ProcessLookupError: # Process already ended
-                        pass
-                    except Exception as term_e:
-                        print(f"Error terminating lingering mpg123 process: {term_e}")
-
-                self.current_process = None
-                async with self.state_lock:
-                    self.state.is_speaking = False
-                    self.state.is_playing = False
-                    self.state.playback_start_time = None
-                    self.state.current_audio_file = None
-                    self.state.expected_duration = None
-                self.audio_complete.set()
-                await self.audio_state_changed.put(('audio_completed', True))
-                print(f"Finished playing: {audio_file}")
-
-
-                if delete_after_play and os.path.exists(audio_file):
-                    try:
-                        os.remove(audio_file)
-                        print(f"Deleted audio file: {audio_file}")
-                    except Exception as e:
-                        print(f"Error deleting audio file {audio_file}: {e}")
-
-    async def stop_current_audio(self):
-        print("Stopping current audio...")
-        if self.current_process and self.current_process.returncode is None: # Check if process exists and is running
-            try:
-                self.current_process.terminate()
-                await asyncio.wait_for(self.current_process.wait(), timeout=2.0) # Wait for termination
-                print("Terminated current audio playback process.")
-            except ProcessLookupError: # Process already ended
-                 print("Audio process already ended.")
-            except asyncio.TimeoutError:
-                print("Timeout waiting for audio process to terminate. Killing.")
-                try:
-                    self.current_process.kill()
-                    await self.current_process.wait() # Wait for kill
-                except ProcessLookupError:
-                    print("Audio process already ended before kill.")
-                except Exception as kill_e:
-                    print(f"Error killing audio process: {kill_e}")
-            except Exception as e:
-                print(f"Error stopping audio process: {e}")
-            finally:
-                self.current_process = None 
-        # Ensure state is updated even if process was already gone
-        async with self.state_lock:
-            if self.state.is_playing: # Only update if it was thought to be playing
-                self.state.is_speaking = False
-                self.state.is_playing = False
-                self.state.playback_start_time = None
-                self.state.current_audio_file = None # Clear current file
-                self.state.expected_duration = None
-        self.audio_complete.set() # Signal completion/stop
-        await self.audio_state_changed.put(('audio_stopped', True))
-        print("Audio stop sequence complete.")
-
-
     async def clear_queue(self):
         print("Clearing audio queue...")
         cleared_count = 0
         while not self.audio_queue.empty():
             try:
                 item = self.audio_queue.get_nowait()
-                # If items store file paths that might need cleanup and weren't played:
-                # audio_file_to_clean, _, delete_on_clear = item
-                # if delete_on_clear and audio_file_to_clean and os.path.exists(audio_file_to_clean):
-                #     os.remove(audio_file_to_clean)
-                #     print(f"Deleted from queue: {audio_file_to_clean}")
                 self.audio_queue.task_done()
                 cleared_count += 1
             except asyncio.QueueEmpty:
@@ -413,11 +391,8 @@ class AudioManager:
                 print("Audio reported complete.")
             except asyncio.TimeoutError:
                 print(f"Timeout waiting for audio completion after {timeout}s.")
-                # Optionally, attempt to stop audio here if timeout means it's stuck
-                # await self.stop_current_audio() 
         else:
             print("No audio currently playing to wait for.")
-
 
     async def wait_for_queue_empty(self, timeout: Optional[float] = None):
         print("Waiting for audio queue to be empty...")
@@ -427,56 +402,44 @@ class AudioManager:
         except asyncio.TimeoutError:
              print(f"Timeout waiting for audio queue to empty after {timeout}s. {self.audio_queue.qsize()} items remaining.")
 
-
     async def initialize_input(self):
-        # This method is a placeholder.
-        # If actual audio input (microphone) initialization is needed, implement here.
-        # For now, it does nothing but ensures the method exists.
         print("AudioManager: initialize_input() called (placeholder).")
-        if not self._initialized: # Should not happen if __init__ succeeded
+        if not self._initialized:
             print("Warning: initialize_input called but core AudioManager not initialized.")
         pass
 
-
     def reset_audio_state(self):
         print("Resetting audio state...")
-        asyncio.create_task(self.stop_current_audio()) # Stop any playing audio
-        asyncio.create_task(self.clear_queue())      # Clear the queue
+        asyncio.create_task(self.stop_current_audio())
+        asyncio.create_task(self.clear_queue())
         
-        # Re-initialize state variables
         self.state = AudioManagerState()
         
-        # Ensure audio_complete is set
         if not self.audio_complete.is_set():
             self.audio_complete.set()
         print("Audio state reset.")
 
-
     def __del__(self):
-        print("AudioManager.__del__ called. Cleaning up PyAudio.")
-        # Ensure queue processor is stopped before PyAudio terminates
-        if self.queue_processor_task and not self.queue_processor_task.done():
-            print("Stopping queue processor during __del__...")
-            # This is tricky in __del__ as async operations are not guaranteed
-            # Best effort:
-            self.is_processing_queue = False
-            # Cannot reliably await here. This should be handled by an explicit shutdown method.
-
-        if hasattr(self, 'pa') and self.pa:
-            try:
-                self.pa.terminate()
-                print("PyAudio terminated.")
-            except Exception as e:
-                print(f"Exception during PyAudio terminate in __del__: {e}")
+        print("AudioManager.__del__ called. Cleaning up pygame.")
+        self.is_processing_queue = False
+        
+        try:
+            pygame.mixer.quit()
+            print("Pygame mixer terminated.")
+        except Exception as e:
+            print(f"Exception during pygame cleanup in __del__: {e}")
 
     async def shutdown(self):
         """Gracefully shutdown the AudioManager."""
         print("AudioManager: Initiating shutdown...")
         await self.stop_current_audio()
-        await self.stop_audio_queue() # This now awaits the task
+        await self.stop_audio_queue()
         await self.clear_queue()
-        # PyAudio termination is handled in __del__ or can be explicitly called if needed before then.
-        # if hasattr(self, 'pa') and self.pa:
-        #    self.pa.terminate()
-        #    print("AudioManager: PyAudio terminated during shutdown.")
+        
+        try:
+            pygame.mixer.quit()
+            print("AudioManager: Pygame mixer terminated during shutdown.")
+        except Exception as e:
+            print(f"Exception during pygame shutdown: {e}")
+            
         print("AudioManager: Shutdown complete.")
