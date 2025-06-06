@@ -37,15 +37,15 @@ The extension implements a two-phase approach:
 1. Clone the repository:
    ```bash
    git clone https://github.com/yourusername/Claude-to-Speech.git
-   cd Claude-to-Speech```
+   cd Claude-to-Speech
 
 
 
 Install dependencies:
-bashpip install -r requirements.txt
+```bashpip install -r requirements.txt```
 
 Configure API credentials in tts_server.py:
-pythonELEVENLABS_API_KEY = "your-api-key-here"
+```pythonELEVENLABS_API_KEY = "your-api-key-here"```
 
 Install the Chrome extension:
 
@@ -55,7 +55,8 @@ Click "Load unpacked" and select the /plugin directory
 
 
 Start the TTS server:
-bashpython tts_launcher.py
+```bash`
+python tts_launcher.py```
 
 
 The extension UI will appear in the top-right corner when visiting claude.ai.
@@ -68,7 +69,7 @@ Status Indicator: Shows server connection health
 
 Advanced Interfaces
 
-TTS Control Panel: http://localhost:7860 - Audio queue management and playback controls
+TTS Control Panel: http://localhost:5000 - Audio queue management and playback controls
 Configuration Manager: http://localhost:5001 - Comprehensive settings management including:
 
 Voice selection and configuration
@@ -78,7 +79,7 @@ Text processing preferences
 Deduplication thresholds
 
 
-
+```
 Project Structure
 Claude-to-Speech/
 ├── plugin/                 # Chrome extension files
@@ -94,6 +95,8 @@ Claude-to-Speech/
 │   ├── extension_config.json
 │   └── processing_config.json
 └── requirements.txt       # Python dependencies
+```
+
 Configuration
 Quick Settings via Config Manager
 Access http://localhost:5001 to modify:
