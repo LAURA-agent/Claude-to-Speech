@@ -19,11 +19,18 @@ const CLAUDE_TTS_CONFIG = {
     retryDelayMs: 750
   },
   
+  detection: {
+    thinkingBlocks: {
+      useTimingIndicator: true,
+      useHeightCheck: false,
+      minHeightThreshold: 40
+    }
+  },
+  
   ui: {
     panelPosition: "bottom-right",
     quiet_mode: true
   }
 };
-
 // Make config available globally
 window.CLAUDE_TTS_CONFIG = CLAUDE_TTS_CONFIG;
