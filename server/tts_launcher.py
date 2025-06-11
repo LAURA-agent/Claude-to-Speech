@@ -1,7 +1,6 @@
-# integrated_tts_launcher.py
 #!/usr/bin/env python3
 """
-Integrated TTS Server + Configuration Manager Launcher
+Integrated TTS Server + Configuration Manager + MCP Server Launcher
 One script to rule them all!
 """
 
@@ -10,6 +9,7 @@ import threading
 import time
 import sys
 import logging
+import subprocess
 from pathlib import Path
 
 # Your existing TTS server imports
@@ -29,6 +29,20 @@ def start_config_manager():
         show_error=True,
         quiet=True  # Reduce Gradio logs
     )
+
+def start_mcp_server():
+    """Start the MCP server in a separate thread"""
+    print("🔌 Starting MCP Server on stdio")
+    
+    # Run the MCP server as a subprocess
+    try:
+        subprocess.run([
+            sys.executable, "mcp_server.py"
+        ], check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"❌ MCP Server failed: {e}")
+    except FileNotFoundError:
+        print("❌ mcp_server.py not found - create it first!")
 
 def start_tts_server():
     """Start the TTS server"""
@@ -51,11 +65,17 @@ def main():
     config_thread = threading.Thread(target=start_config_manager, daemon=True)
     config_thread.start()
     
-    # Give Gradio a moment to start
+    # Start MCP server in background thread
+    mcp_thread = threading.Thread(target=start_mcp_server, daemon=True)
+    mcp_thread.start()
+    
+    # Give services a moment to start
     time.sleep(2)
     
     print("✅ Configuration Manager: http://127.0.0.1:5001")
-    print("🎛️ Manage voices, settings, and configurations there")
+    print("🔌 MCP Server: Running on stdio")
+    print("🎛️ Manage voices, settings, and configurations via Gradio")
+    print("🤖 AI assistants can use MCP tools for TTS")
     print("=" * 50)
     
     # Start TTS server in main thread (this blocks)
