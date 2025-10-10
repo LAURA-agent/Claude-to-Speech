@@ -8,7 +8,7 @@
       "name": "claude-to-speech",
       "source": {
         "source": "github",
-        "repo": "LAURA-agent/claude-to-speech"
+        "repo": "LAURA-agent/Claude-to-Speech"
       },
       "description": "Voice-first interaction with automatic TTS markers"
     }
