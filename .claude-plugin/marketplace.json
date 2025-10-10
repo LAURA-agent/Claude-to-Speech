@@ -6,8 +6,8 @@
   "plugins": [
     {
       "name": "claude-to-speech",
-      "source": "LAURA-agent/claude-to-speech",
+      "source": {
+        "source": "github"
+      "repo": "LAURA-agent/claude-to-speech",
       "description": "Voice-first interaction with automatic TTS markers"
     }
-  ]
-}
