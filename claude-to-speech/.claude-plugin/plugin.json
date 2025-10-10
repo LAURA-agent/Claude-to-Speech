@@ -1,0 +1,8 @@
+{
+  "name": "claude-to-speech",
+  "description": "Voice-first interaction mode with automatic TTS notifications for Claude Code",
+  "version": "1.0.0",
+  "author": {
+    "name": "LAURA-agent"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "LAURA-marketplace",
+  "owner": {
+    "name": "LAURA-agent"
+  },
+  "plugins": [
+    {
+      "name": "claude-to-speech",
+      "source": "./claude-to-speech",
+      "description": "Voice-first interaction with automatic TTS markers"
+    }
+  ]
+}
