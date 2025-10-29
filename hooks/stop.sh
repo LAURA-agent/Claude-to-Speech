@@ -6,7 +6,7 @@
 #
 
 # Debug logging (set DEBUG=1 in .env to enable)
-DEBUG="${DEBUG:-0}"
+DEBUG="${DEBUG:-1}"
 DEBUG_FILE="/tmp/claude_stop_hook.log"
 
 # Get the plugin directory (parent of hooks directory)
@@ -57,6 +57,27 @@ except:
 
     [ "$DEBUG" = "1" ] && echo "Extracted response length: ${#RESPONSE} chars" >> "$DEBUG_FILE"
     [ "$DEBUG" = "1" ] && echo "First 200 chars: ${RESPONSE:0:200}" >> "$DEBUG_FILE"
+
+    # Prevent duplicate execution using atomic file locking
+    LOCK_FILE="/tmp/claude_tts_hook.lock"
+    RESPONSE_HASH=$(echo "$RESPONSE" | md5sum | cut -d' ' -f1)
+
+    # Use flock for atomic locking - only one process can hold the lock
+    exec 200>"$LOCK_FILE"
+    if ! flock -n 200; then
+        [ "$DEBUG" = "1" ] && echo "Another hook instance is processing, skipping" >> "$DEBUG_FILE"
+        exit 0
+    fi
+
+    # Check if we already processed this exact message
+    LAST_HASH=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
+    if [ "$RESPONSE_HASH" = "$LAST_HASH" ]; then
+        [ "$DEBUG" = "1" ] && echo "Duplicate message detected (same content hash), skipping" >> "$DEBUG_FILE"
+        flock -u 200
+        exit 0
+    fi
+
+    echo "$RESPONSE_HASH" > "$LOCK_FILE"
 else
     [ "$DEBUG" = "1" ] && echo "Transcript file not found: $TRANSCRIPT_PATH" >> "$DEBUG_FILE"
     exit 0
