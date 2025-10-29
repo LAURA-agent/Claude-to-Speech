@@ -1,0 +1,13 @@
+# Core dependencies for TTS server
+quart>=0.19.0
+quart-cors>=0.7.0
+elevenlabs>=1.0.0
+pygame>=2.5.0
+mutagen>=1.47.0
+numpy>=1.24.0
+
+# Plugin dependencies
+requests>=2.31.0
+
+# Optional: for .env file support
+python-dotenv>=1.0.0

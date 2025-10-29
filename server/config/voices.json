@@ -1,0 +1,20 @@
+{
+  "active_voice": "robo-LAURA",
+  "voices": {
+    "LAURA": {
+      "name": "qEwI395unGwWV1dn3Y65",
+      "model": "eleven_flash_v2_5",
+      "persona": "laura"
+    },
+    "Claude": {
+      "name": "uY96J30mUhYUIymmD5cu!H82",
+      "model": "eleven_flash_v2_5",
+      "persona": "claude"
+    },
+    "robo-LAURA": {
+      "name": "43WCRcu4Axd2KIaxt4M7",
+      "model": "eleven_flash_v2_5",
+      "persona": "laura"
+    }
+  }
+}

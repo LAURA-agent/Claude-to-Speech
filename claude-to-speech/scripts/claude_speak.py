@@ -31,6 +31,7 @@ except ImportError:
 VOICE_MAPPINGS = {
     # Primary personas
     "laura": "qEwI395unGwWV1dn3Y65",
+    "robo-laura": "43WCRcu4Axd2KIaxt4M7",  # Robotic LAURA voice
     "claude": "uY96J30mUhYUIymmD5cu",
     "alfred": "uY96J30mUhYUIymmD5cu",  # Claude's voice (British butler style)
 
@@ -44,7 +45,7 @@ VOICE_MAPPINGS = {
     "josh": "TxGEqnHWrfWFTfGW9XjX",     # Young male
 
     # Aliases for convenience
-    "default": "uY96J30mUhYUIymmD5cu",
+    "default": "43WCRcu4Axd2KIaxt4M7",  # Default to robo-LAURA
     "assistant": "uY96J30mUhYUIymmD5cu",
     "british": "uY96J30mUhYUIymmD5cu",
     "american": "qEwI395unGwWV1dn3Y65",
@@ -85,10 +86,18 @@ def get_voice_id(voice_input: str) -> str:
 # Configuration - can be overridden by config.py or environment variables
 try:
     from config import ELEVENLABS_API_KEY, VOICE_ID, SERVER_URL, ELEVENLABS_MODEL
+    # Load custom voices if defined
+    try:
+        from config import CUSTOM_VOICES
+        VOICE_MAPPINGS.update(CUSTOM_VOICES)
+    except ImportError:
+        pass
+    # Resolve voice ID through mapping
+    VOICE_ID = get_voice_id(VOICE_ID)
 except ImportError:
     ELEVENLABS_API_KEY = os.environ.get('ELEVENLABS_API_KEY', '')
     # Use the mapping function for voice selection
-    raw_voice = os.environ.get('CLAUDE_VOICE_ID', 'claude')
+    raw_voice = os.environ.get('CLAUDE_VOICE_ID', 'robo-laura')
     VOICE_ID = get_voice_id(raw_voice)
     SERVER_URL = os.environ.get('TTS_SERVER_URL', '')  # Empty = direct API mode
     ELEVENLABS_MODEL = os.environ.get('ELEVENLABS_MODEL', 'eleven_flash_v2_5')  # Fast model
