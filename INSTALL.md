@@ -2,36 +2,30 @@
 
 Complete self-contained TTS system for Claude Code. One git clone, one API key, done.
 
-## Quick Start (5 Minutes)
+## Quick Start (2 Minutes)
 
 ### 1. Clone the Repository
 
 ```bash
-git clone <your-repo-url> claude-to-speech
-cd claude-to-speech
+git clone https://github.com/LAURA-agent/Claude-to-Speech.git
+cd Claude-to-Speech
 ```
 
-### 2. Install Dependencies
+### 2. Run Setup Script
 
 ```bash
-pip install -r requirements.txt
+./setup.sh
 ```
 
-### 3. Add Your API Key
-
-```bash
-cd server/config
-cp secret.example.py secret.py
-nano secret.py  # Add your ElevenLabs API key
-```
-
-```python
-ELEVENLABS_API_KEY = "sk_your_actual_key_here"
-```
+The script will:
+- Install Python dependencies
+- Prompt for your ElevenLabs API key
+- Configure all necessary files
+- Make hooks executable
 
 **Get an API key:** https://elevenlabs.io → Profile → API Keys
 
-### 4. Start the TTS Server
+### 3. Start the TTS Server
 
 ```bash
 cd ../..  # Back to claude-to-speech root
