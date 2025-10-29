@@ -14,8 +14,20 @@ if [ ! -f "requirements.txt" ] || [ ! -d "server" ]; then
     exit 1
 fi
 
-# Step 1: Install Python dependencies
+# Step 1: Create virtual environment if it doesn't exist
+if [ ! -d "venv" ]; then
+    echo "🐍 Creating Python virtual environment..."
+    python3 -m venv venv
+    echo "✅ Virtual environment created"
+else
+    echo "✅ Virtual environment already exists"
+fi
+echo ""
+
+# Activate virtual environment
 echo "📦 Installing Python dependencies..."
+source venv/bin/activate
+pip install --upgrade pip
 pip install -r requirements.txt
 echo "✅ Dependencies installed"
 echo ""
@@ -71,10 +83,13 @@ echo "   Setup Complete!"
 echo "================================================"
 echo ""
 echo "Next steps:"
-echo "1. Start the TTS server:"
+echo "1. Activate the virtual environment:"
+echo "   source venv/bin/activate"
+echo ""
+echo "2. Start the TTS server:"
 echo "   python3 server/tts_server.py"
 echo ""
-echo "2. In Claude Code, run:"
+echo "3. In Claude Code, run:"
 echo "   /speak"
 echo ""
 echo "For troubleshooting, see INSTALL.md"
