@@ -2,6 +2,9 @@
   "name": "claude-to-speech",
   "version": "1.0.0",
   "description": "Voice-first interaction with automatic TTS markers for Claude Code",
-  "author": "LAURA-agent",
+  "author": {
+    "name": "LAURA-agent"
+  },
+  "repository": "https://github.com/LAURA-agent/Claude-to-Speech",
   "license": "MIT"
 }
