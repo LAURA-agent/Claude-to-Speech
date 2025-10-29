@@ -1,0 +1,7 @@
+{
+  "name": "claude-to-speech",
+  "version": "1.0.0",
+  "description": "Voice-first interaction with automatic TTS markers for Claude Code",
+  "author": "LAURA-agent",
+  "license": "MIT"
+}
