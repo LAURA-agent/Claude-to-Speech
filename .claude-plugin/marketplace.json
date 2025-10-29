@@ -1,0 +1,13 @@
+{
+  "name": "marketplace",
+  "owner": {
+    "name": "LAURA-agent"
+  },
+  "plugins": [
+    {
+      "name": "claude-to-speech",
+      "source": "./",
+      "description": "Voice-first TTS interaction for Claude Code"
+    }
+  ]
+}
